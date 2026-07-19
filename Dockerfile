@@ -26,16 +26,22 @@ COPY . /var/www/html
 
 # Installe les dépendances PHP via Composer
 RUN composer install --ignore-platform-reqs
-RUN php artisan config:cache
-# RUN    php artisan route:cache 
-RUN    chmod 777 -R /var/www/html/storage/ 
+# NE PAS faire "config:cache" ici : à ce stade les variables d'environnement
+# Railway (DB_HOST, APP_KEY, etc.) n'existent pas encore, donc le cache
+# figerait des valeurs vides/nulles et les vraies variables d'env seraient
+# ignorées au démarrage du conteneur. Le cache est régénéré au runtime
+# (voir CMD plus bas) une fois que Railway a injecté les vraies variables.
+# RUN    php artisan route:cache
+RUN    chmod 777 -R /var/www/html/storage/
 RUN    chown -R www-data:www-data /var/www/
 
 # Expose le port 8000 pour le serveur artisan
 EXPOSE 8000
 
-# Exécute la commande artisan serve lors du démarrage du conteneur
-CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
+# Au démarrage du conteneur (les vraies variables d'env Railway sont dispo ici) :
+# on nettoie un éventuel cache figé, on regénère la config avec les vraies
+# valeurs, puis on lance le serveur.
+CMD php artisan config:clear && php artisan config:cache && php artisan serve --host=0.0.0.0 --port=8000
 
 # FROM php:8.0-apache-buster as production
 
