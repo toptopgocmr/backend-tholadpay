@@ -1,0 +1,22 @@
+[
+	{
+		"code":"XAF",
+		"symbol":"XAF",
+		"rate":0.35
+	},
+	{
+		"code":"USD",
+		"symbol":"$",
+		"rate":0.0005
+	},
+	{
+		"code":"EUR",
+		"symbol":"€",
+		"rate":0.00053
+	},
+	{
+		"code":"CAD",
+		"symbol":"$",
+		"rate":0.0008
+	}
+]

@@ -1,0 +1,66 @@
+[
+  {
+    "display_name" : "Administrateur",
+    "description" : "tous les rôles des fonctions du menu Administration",
+    "name" : "administrator",
+    "permissions":[
+      "add.offer",
+      "edit.offer",
+      "delete.offer",
+      "consult.offer",
+
+      "add.phone_number",
+      "edit.phone_number",
+      "delete.phone_number",
+      "consult.phone_number",
+
+      "add.match",
+      "edit.match",
+      "delete.match",
+      "consult.match",
+
+      "add.town",
+      "edit.town",
+      "delete.town",
+      "consult.town",
+
+      "add.user",
+      "edit.user",
+      "delete.user",
+      "consult.user",
+
+      "add.role",
+      "edit.role",
+      "delete.role",
+      "consult.role",
+
+      "add.permission",
+      "edit.permission",
+      "delete.permission",
+      "consult.permission"
+    ]
+  },
+  {
+    "display_name" : "Agent",
+    "description" : "Peux gerer les commissions et ses pdv où sont installés les caissiers",
+    "name" : "agent",
+    "permissions":[
+
+      "consult.offer",
+
+      "valid.ticket"
+    ]
+  },
+  {
+    "display_name" : "Caissier",
+    "description" : "peux gerer les pdv donc les transactions...",
+    "name" : "cashier",
+    "permissions":[
+      "consult.offer",
+
+      "consult.stat",
+
+      "add.cash.offer"
+    ]
+  }
+]

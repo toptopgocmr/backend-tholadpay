@@ -1,0 +1,83 @@
+[
+	{
+		"code": "np",
+		"name": "no plan",
+		"type": "m",
+		"description": "empty plan",
+		"max_transaction" : "0",
+		"max_amount":"0",
+		"price":"0",
+		"currency":"USD"
+	},
+	{
+		"code": "fr",
+		"name": "free",
+		"type": "m",
+		"description": "default plan",
+		"max_transaction" : "1",
+		"max_amount":"1000",
+		"price":"0",
+		"currency":"USD"
+	},
+	{
+		"code": "brm",
+		"name": "bronze",
+		"type": "m",
+		"description": "bronze plan",
+		"max_transaction" : "3",
+		"max_amount":"2000",
+		"price":"10",
+		"currency":"USD"
+	},
+	{
+		"code": "bry",
+		"name": "bronze",
+		"type": "y",
+		"description": "bronze plan",
+		"max_transaction" : "40",
+		"max_amount":"24000",
+		"price":"100",
+		"currency":"USD"
+	},
+	{
+		"code": "slm",
+		"name": "silver",
+		"type": "m",
+		"description": "silver plan",
+		"max_transaction" : "5",
+		"max_amount":"4000",
+		"price":"20",
+		"currency":"USD"
+	},
+	{
+		"code": "sly",
+		"name": "silver",
+		"type": "y",
+		"description": "silver plan",
+		"max_transaction" : "80",
+		"max_amount":"50000",
+		"price":"200",
+		"currency":"USD"
+	},
+	{
+		"code": "glm",
+		"name": "gold",
+		"type": "m",
+		"description": "gold plan",
+		"max_transaction" : "30",
+		"max_amount":"100000",
+		"price":"30",
+		"currency":"USD"
+	},
+	{
+		"code": "gly",
+		"name": "gold",
+		"type": "y",
+		"description": "gold plan",
+		"max_transaction" : "400",
+		"max_amount":"1500000",
+		"price":"300",
+		"currency":"USD"
+	}
+
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "code": "aide",
+    "title": "Aide familiale"
+  },
+  {
+    "code": "tontine",
+    "title": "Tontine"
+  },
+  {
+    "code": "pret",
+    "title": "Remboursement d'un prêt"
+  },
+  {
+    "code": "reglement",
+    "title": "Règlement fournisseur"
+  },
+  {
+    "code": "frais-m",
+    "title": "Frais médicaux"
+  },
+  {
+    "code": "frais-c",
+    "title": "Frais de construction"
+  }
+]

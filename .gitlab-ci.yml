@@ -1,0 +1,59 @@
+image: node:lts-alpine
+
+stages:
+  - build
+  - test
+  - monitor
+  - secure
+  - deploy
+
+build_prod_docker:
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_DRIVER: overlay
+    DOCKER_TLS_CERTDIR: ""
+  stage: build
+  only:
+    - master
+  script:
+    - cp .env.devops .env
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build --pull -t $CI_REGISTRY_IMAGE/backend:prod .
+    - docker push $CI_REGISTRY_IMAGE/backend:prod
+
+deploy_test:
+  stage: deploy
+  image: docker:latest
+  only:
+    - master
+  services:
+    - docker:dind
+  variables:
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_DEFAULT_REGION: us-east-1
+    DOCKER_DRIVER: overlay
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - apk --no-cache add curl jq
+    - apk add --no-cache python3-dev
+    - apk add --no-cache aws-cli
+    - aws --version
+    - curl https://s3.us-west-2.amazonaws.com/lightsailctl/latest/linux-amd64/lightsailctl -o /usr/local/bin/lightsailctl
+    - chmod +x /usr/local/bin/lightsailctl
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull registry.gitlab.com/team-dev2401915/backend-flashpay/backend:prod
+    # 4. Upload the docker image for this pipeline
+    - aws lightsail push-container-image
+      --service-name backend-flashpay
+      --label pipeline-${CI_PIPELINE_ID}
+      --image registry.gitlab.com/team-dev2401915/backend-flashpay/backend:prod
+    # 5. Get the uploaded image (its different every time)
+    - PIPELINE_IMAGE_TAG=$(aws lightsail get-container-images --service backend-flashpay | jq -r .containerImages[0].image)
+    # 6. Create a deployment with the uploaded docker image
+    - aws lightsail create-container-service-deployment
+      --service-name backend-flashpay
+      --containers "{\"backend-flashpay\":{\"image\":\"$PIPELINE_IMAGE_TAG\",\"ports\":{\"8000\":\"HTTP\"}}}"
+      --public-endpoint "{\"containerName\":\"backend-flashpay\",\"containerPort\":8000,\"healthCheck\":{\"path\":\"/\"}}"

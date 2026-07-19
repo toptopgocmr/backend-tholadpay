@@ -1,0 +1,168 @@
+[
+  {
+    "display_name" : "Add Film",
+    "name" : "add.film",
+    "description" : "Add Film"
+  },
+  {
+    "display_name" : "Edit Film",
+    "name" : "edit.film",
+    "description" : "Edit Film"
+  },
+  {
+    "display_name" : "Delete Film",
+    "name" : "delete.film",
+    "description" : "Delete Film"
+  },
+  {
+    "display_name" : "Consult Film",
+    "name" : "consult.film",
+    "description" : "Consult Film"
+  },
+
+  {
+    "display_name" : "Add Movietheater",
+    "name" : "add.movietheater",
+    "description" : "Add Movietheater"
+  },
+  {
+    "display_name" : "Edit Movietheater",
+    "name" : "edit.movietheater",
+    "description" : "Edit Movietheater"
+  },
+  {
+    "display_name" : "Delete Movietheater",
+    "name" : "delete.movietheater",
+    "description" : "Delete Movietheater"
+  },
+  {
+    "display_name" : "Consult Movietheater",
+    "name" : "consult.movietheater",
+    "description" : "Consult Movietheater"
+  },
+
+  {
+    "display_name" : "Add Schedule",
+    "name" : "add.schedule",
+    "description" : "Add Schedule"
+  },
+  {
+    "display_name" : "Edit Schedule",
+    "name" : "edit.schedule",
+    "description" : "Edit Schedule"
+  },
+  {
+    "display_name" : "Delete Schedule",
+    "name" : "delete.schedule",
+    "description" : "Delete Schedule"
+  },
+  {
+    "display_name" : "Consult Schedule",
+    "name" : "consult.schedule",
+    "description" : "Consult Schedule"
+  },
+
+  {
+    "display_name" : "Add Town",
+    "name" : "add.town",
+    "description" : "Add Town"
+  },
+  {
+    "display_name" : "Edit Town",
+    "name" : "edit.town",
+    "description" : "Edit Town"
+  },
+  {
+    "display_name" : "Delete Town",
+    "name" : "delete.town",
+    "description" : "Delete Town"
+  },
+  {
+    "display_name" : "Consult Town",
+    "name" : "consult.town",
+    "description" : "Consult Town"
+  },
+
+  {
+    "display_name" : "Add User",
+    "name" : "add.user",
+    "description" : "Add User"
+  },
+  {
+    "display_name" : "Edit User",
+    "name" : "edit.user",
+    "description" : "Edit User"
+  },
+  {
+    "display_name" : "Delete User",
+    "name" : "delete.user",
+    "description" : "Delete User"
+  },
+  {
+    "display_name" : "Consult User",
+    "name" : "consult.user",
+    "description" : "Consult User"
+  },
+
+  {
+    "display_name" : "Add Role",
+    "name" : "add.role",
+    "description" : "Add Role"
+  },
+  {
+    "display_name" : "Edit Role",
+    "name" : "edit.role",
+    "description" : "Edit Role"
+  },
+  {
+    "display_name" : "Delete Role",
+    "name" : "delete.role",
+    "description" : "Delete Role"
+  },
+  {
+    "display_name" : "Consult Role",
+    "name" : "consult.role",
+    "description" : "Consult Role"
+  },
+
+  {
+    "display_name" : "Add Permission",
+    "name" : "add.permission",
+    "description" : "Add Permission"
+  },
+  {
+    "display_name" : "Edit Permission",
+    "name" : "edit.permission",
+    "description" : "Edit Permission"
+  },
+  {
+    "display_name" : "Delete Permission",
+    "name" : "delete.permission",
+    "description" : "Delete Permission"
+  },
+  {
+    "display_name" : "Consult Permission",
+    "name" : "consult.permission",
+    "description" : "Consult Permission"
+  },
+
+
+
+  {
+    "display_name" : "Valid Ticket",
+    "name" : "valid.ticket",
+    "description" : "Valid Ticket"
+  },
+
+  {
+    "display_name" : "Consult Stat",
+    "name" : "consult.stat",
+    "description" : "Consult Stat"
+  },
+
+  {
+    "display_name" : "Add Cash Ticket",
+    "name" : "add.cash.ticket",
+    "description" : "Add Cash Ticket"
+  }
+]

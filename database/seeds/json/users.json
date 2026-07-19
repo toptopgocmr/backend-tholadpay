@@ -1,0 +1,28 @@
+[
+	{
+		"first_name": "John",
+		"last_name": "Doe",
+		"picture": "",
+		"phone_number": "+2426787998732",
+		"email" : "admin@mailinator.com",
+		"settings":"",
+		"is_active": true,
+		"password":"admin123",
+		"roles" : [
+			"administrator"
+		]
+	},
+	{
+		"first_name": "Admin",
+		"last_name": "THOLADPAY",
+		"picture": "",
+		"phone_number": "+2426787998711",
+		"email" : "admin@tholadpay.com",
+		"settings":"",
+		"is_active": true,
+		"password":"Secure01",
+		"roles" : [
+			"administrator"
+		]
+	}
+]

@@ -1,0 +1,58 @@
+[
+  {
+    "name": "MTN Cameroon",
+    "code": "mtn-cm",
+    "logo":"mtn.png"
+  },
+  {
+    "name": "MTN Nigeria",
+    "code": "mtn-nig",
+    "logo":"mtn.png"
+  },
+  {
+    "name": "Orange Cameroon",
+    "code": "ocm",
+    "logo":"orange.jpg"
+  },
+  {
+    "name": "Nextel Cameroon",
+    "code": "nex-cm",
+    "logo":"nextel.jpg"
+  },
+  {
+    "name": "Camtel",
+    "code": "cam",
+    "logo":"camtel.png"
+  },
+  {
+    "name": "Airtel Nigeria",
+    "code": "air-nig",
+    "logo":"airtel.png"
+  },
+  {
+    "name": "Verizon Wireless",
+    "code": "ver-w",
+    "logo":"verizon.jpg"
+  },
+  {
+    "name": "T-Mobile",
+    "code": "t-mob",
+    "logo":"t-mobile.jpg"
+  },
+  {
+    "name": "AT&T",
+    "code": "att",
+    "logo":"att.png"
+  },
+  {
+    "name": "sfr",
+    "code": "sfr",
+    "logo":"sfr.png"
+  },
+  {
+    "name": "Orange France",
+    "code": "ofr",
+    "logo":"orange.jpg"
+  }
+
+]
