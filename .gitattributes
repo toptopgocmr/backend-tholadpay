@@ -8,3 +8,7 @@
 
 /.github export-ignore
 CHANGELOG.md export-ignore
+
+# Toujours LF, même sur Windows : un script shell avec des retours chariot
+# CRLF casse le "#!/bin/sh" dans le conteneur Linux (bad interpreter).
+*.sh text eol=lf
