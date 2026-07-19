@@ -35,13 +35,18 @@ RUN composer install --ignore-platform-reqs
 RUN    chmod 777 -R /var/www/html/storage/
 RUN    chown -R www-data:www-data /var/www/
 
-# Expose le port 8000 pour le serveur artisan
+# Port par défaut pour un run local (docker run) hors Railway.
 EXPOSE 8000
 
 # Au démarrage du conteneur (les vraies variables d'env Railway sont dispo ici) :
 # on nettoie un éventuel cache figé, on regénère la config avec les vraies
 # valeurs, puis on lance le serveur.
-CMD php artisan config:clear && php artisan config:cache && php artisan serve --host=0.0.0.0 --port=8000
+# IMPORTANT : Railway assigne dynamiquement un port via la variable $PORT et
+# route le trafic public vers CE port precis. Le serveur doit donc écouter
+# dessus (et non sur un 8000 en dur), sinon le healthcheck et toutes les
+# requêtes échouent avec "service unavailable" même si le conteneur démarre
+# bien. ${PORT:-8000} retombe sur 8000 si $PORT n'existe pas (run local).
+CMD php artisan config:clear && php artisan config:cache && php artisan serve --host=0.0.0.0 --port=${PORT:-8000}
 
 # FROM php:8.0-apache-buster as production
 
