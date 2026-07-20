@@ -30,7 +30,21 @@ class Country extends Model
         if($val==null){
             $val='default/country.png';
         }
-        return env('APP_URL')."flags/" . $val;
+
+        // Certains pays ont deja une URL complete enregistree en base (ex:
+        // heritee d'un ancien stockage sur elasticbeanstalk.com). Dans ce
+        // cas il ne faut pas la reconcatener avec APP_URL, sinon on obtient
+        // une URL cassee du type "https://.../flagshttp://...".
+        if (preg_match('#^https?://#i', $val)) {
+            return $val;
+        }
+
+        // config('app.url') plutot que env('APP_URL') : reste fiable meme
+        // apres un "php artisan config:cache" (fait au demarrage du
+        // conteneur, voir docker-entrypoint.sh).
+        // rtrim/ltrim pour eviter un "//" ou un slash manquant selon que
+        // APP_URL se termine deja par "/" ou non.
+        return rtrim(config('app.url'), '/') . '/flags/' . ltrim($val, '/');
     }
 
     public function getLabel()
