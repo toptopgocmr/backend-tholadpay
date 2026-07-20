@@ -10,6 +10,12 @@ class Kernel extends HttpKernel
      * The application's global HTTP middleware stack.
      */
     protected $middleware = [
+        // Doit tourner en premier : lit X-Forwarded-Proto envoye par le proxy
+        // Railway pour que Laravel sache que la requete est en HTTPS (sinon
+        // request()->isSecure() renvoie false et asset()/url() generent des
+        // liens en http://, bloques en tant que "Mixed Content" par le
+        // navigateur puisque la page elle-meme est servie en https://).
+        \App\Http\Middleware\TrustProxies::class,
         \Fruitcake\Cors\HandleCors::class,
         \Illuminate\Foundation\Http\Middleware\CheckForMaintenanceMode::class,
     ];
