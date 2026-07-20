@@ -3,7 +3,10 @@
 namespace App\Http\Middleware;
 
 use Illuminate\Http\Request;
-use Fideloper\Proxy\TrustProxies as Middleware;
+// Fideloper\Proxy\TrustProxies n'est pas installe (absent de composer.json/
+// lock) : cette classe n'existe pas -> 500 fatal des que ce middleware est
+// active. Laravel 8 fournit l'equivalent en natif, on l'utilise a la place.
+use Illuminate\Http\Middleware\TrustProxies as Middleware;
 
 class TrustProxies extends Middleware
 {
