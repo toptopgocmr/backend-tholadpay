@@ -1,17 +1,18 @@
 #!/bin/sh
 set -e
 
-# Le fallback "${PORT:-8000}" n'a pas suffi : le 502 "connection refused"
-# persistait, ce qui veut dire que Railway injecte bien une valeur de $PORT
-# au conteneur, mais probablement PAS 8000 — alors que le "Target Port" fixé
-# côté Railway (Settings > Networking > domaine public) est lui bien 8000.
-# Comme Railway route TOUJOURS le trafic public vers ce Target Port fixe
-# (peu importe la valeur réelle de $PORT), on ignore désormais $PORT et on
-# force Apache à écouter en dur sur 8000 pour être certain que ça matche.
-# Si vous changez un jour le Target Port dans Railway, changez cette valeur
-# en conséquence.
-PORT="8000"
-echo "docker-entrypoint: Apache va ecouter sur le port ${PORT} (fixe, doit matcher le Target Port Railway)"
+# Retour en arriere : coder le port en dur (8000) a casse le healthcheck
+# interne de Railway (diagnostic Railway confirme : "Apache to bind to port
+# 8000 while Railway's healthcheck probed a different port"). Railway
+# injecte donc bien une vraie valeur de $PORT et l'utilise en interne — on
+# doit la respecter, pas la court-circuiter. Le vrai probleme est ailleurs :
+# le "Target Port" fixe (8000) configure cote Railway (Settings > Networking
+# > domaine public) ne correspond visiblement pas a cette valeur de $PORT,
+# ce qui casse le routage du trafic PUBLIC (le healthcheck interne, lui,
+# passe). On logue la valeur brute recue pour aller corriger le Target Port
+# dans les reglages Railway en consequence.
+echo "docker-entrypoint: valeur brute de \$PORT recue de Railway = '${PORT:-<non definie>}'"
+PORT="${PORT:-8000}"
 
 sed -ri "s/Listen [0-9]+/Listen 0.0.0.0:${PORT}/g" /etc/apache2/ports.conf
 sed -ri "s/:80>/:${PORT}>/g" /etc/apache2/sites-available/*.conf
