@@ -5,9 +5,16 @@ set -e
 # vers celui-ci. Apache écoute par défaut sur le port 80 : on remplace ce
 # port dans la conf Apache au démarrage du conteneur (les variables
 # d'environnement Railway ne sont dispo qu'à ce moment-là, pas au build).
-PORT="${PORT:-80}"
+#
+# Le "Target Port" configuré côté Railway (Settings > Networking) pour le
+# domaine public est fixé à 8000 (voir capture du 20/07). Si $PORT n'est
+# pas injecté par Railway (cas courant quand le port public est fixé
+# manuellement plutôt qu'en mode auto), on retombe donc sur 8000 et non 80,
+# sinon Apache écoute sur le mauvais port et le proxy public renvoie
+# "connection refused" (502) alors que le healthcheck interne, lui, passe.
+PORT="${PORT:-8000}"
 
-sed -ri "s/Listen [0-9]+/Listen ${PORT}/g" /etc/apache2/ports.conf
+sed -ri "s/Listen [0-9]+/Listen 0.0.0.0:${PORT}/g" /etc/apache2/ports.conf
 sed -ri "s/:80>/:${PORT}>/g" /etc/apache2/sites-available/*.conf
 
 # Les vraies variables d'env Railway (DB_HOST, APP_KEY, etc.) ne sont
