@@ -16,4 +16,12 @@ sed -ri "s/:80>/:${PORT}>/g" /etc/apache2/sites-available/*.conf
 php artisan config:clear
 php artisan config:cache
 
+# Railway réactive parfois mpm_event/mpm_worker en plus de mpm_prefork déjà
+# actif dans l'image php:8.1-apache (mod_php exige prefork). Deux MPM actifs
+# en même temps font planter Apache au démarrage avec :
+#   AH00534: apache2: Configuration error: More than one MPM loaded.
+# On force donc explicitement un seul MPM (prefork) juste avant de lancer Apache.
+a2dismod mpm_event mpm_worker 2>/dev/null || true
+a2enmod mpm_prefork 2>/dev/null || true
+
 exec apache2-foreground
