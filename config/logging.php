@@ -50,7 +50,16 @@ return [
     'channels' => [
         'stack' => [
             'driver' => 'stack',
-            'channels' => ['single'],
+            // FIX (2026-07-22) : sur Railway, seuls stdout/stderr du conteneur sont
+            // capturés par le visualiseur de logs — les logs écrits dans un fichier
+            // (storage/logs/laravel*.log, ex: canal "daily" utilisé jusqu'ici) restent
+            // invisibles depuis Railway. On garde "daily" (fichier, utile en local/debug
+            // sur le serveur) tout en dupliquant aussi vers "stderr" pour que les logs
+            // Log::info/Log::error (dont ceux de OutboundController::check_account_status)
+            // apparaissent enfin dans Railway. Pour activer : mettre LOG_CHANNEL=stack
+            // dans les variables Railway (actuellement LOG_CHANNEL=daily, qui n'utilise
+            // pas ce canal du tout).
+            'channels' => ['daily', 'stderr'],
             'ignore_exceptions' => false,
         ],
 
