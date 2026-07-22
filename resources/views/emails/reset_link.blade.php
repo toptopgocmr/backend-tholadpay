@@ -296,7 +296,7 @@
           <table cellspacing="0" cellpadding="0" width="600" class="w320">
             <tr>
               <td style="padding: 25px 0 25px">
-                <strong>tholadpay.com</strong><br />
+                <strong>send-paz.com</strong><br />
               </td>
             </tr>
           </table>

@@ -38,8 +38,8 @@ class PasswordResetController extends Controller
 
             Mail::send('emails.reset_link', compact('email', 'token'), function ($mail) use ($email) {
                 $mail->to($email)
-                    ->from('noreply@tholadpay.com')
-                    ->subject('THOLADPAY : Password reset link');
+                    ->from('noreply@send-paz.com')
+                    ->subject('SEND-PAZ : Password reset link');
             });
         }
 
