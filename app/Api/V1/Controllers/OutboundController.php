@@ -314,10 +314,19 @@ class OutboundController extends Controller
                 break;
             } catch (\GuzzleHttp\Exception\RequestException $e) {
                 $lastException = $e;
-                $isRouteNotFound = $e->hasResponse() && $e->getResponse()->getStatusCode() === 404;
+                $statusCode = $e->hasResponse() ? $e->getResponse()->getStatusCode() : null;
+                // FIX (2026-07-22) : le repli vers le chemin suivant ne se déclenchait
+                // qu'en cas de 404. Or l'historique de cette intégration (voir
+                // rapport_integration_peex.md §4.6) montre que "clients/verify-wallet"
+                // (tiret, doc officielle) répond parfois 500 en sandbox alors que
+                // "clients/verify_wallet" (underscore, legacy) répond correctement au
+                // même instant. Sans repli sur 500, ces 500 remontaient telles quelles
+                // à l'utilisateur alors qu'un chemin fonctionnel existait. On tente donc
+                // aussi le chemin suivant sur toute erreur 404 ou 5xx.
+                $shouldFallback = $statusCode === 404 || ($statusCode !== null && $statusCode >= 500);
                 $hasMorePaths = $i < count($paths) - 1;
-                if ($isRouteNotFound && $hasMorePaths) {
-                    Log::warning("[Peex check_account_status] $path introuvable (404), tentative du chemin suivant.");
+                if ($shouldFallback && $hasMorePaths) {
+                    Log::warning("[Peex check_account_status] $path a échoué (HTTP $statusCode), tentative du chemin suivant.");
                     continue;
                 }
                 break;
