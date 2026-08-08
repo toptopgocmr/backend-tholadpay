@@ -14,7 +14,12 @@ class Transaction extends Model
     protected $fillable = ['amount', 'aml_cft', 'fxrate', 'from_currency', 'to_currency', 'recipient_first_name', 'ranking',
         'recipient_last_name', 'recipient_phone', 'receiving_country', 'transaction_reference', 'transaction_reason', 'sender_id', 'user_id',
         'transaction_status', 'montant_beneficiaire', 'frais_envoi', 'validate', 'valid_id', 'validate_at', 'csa_id', 'agent_id', 'payer', 'nom_api', 'date_init', 'date_complete',
-        'fees', 'receiving_country_code', 'description', 'reference', 'tarif_id', 'corridor_id', 'etat_transac', 'observations'
+        'fees', 'receiving_country_code', 'description', 'reference', 'tarif_id', 'corridor_id', 'etat_transac', 'observations',
+        // Saisie facultative, dès la création mobile, des champs propres à DigitWace
+        // (pièce d'identité + relation du bénéficiaire) — voir migration
+        // add_receiver_digitwace_fields_to_transactions_table. Repris automatiquement
+        // à l'étape de validation si le partenaire DigitWace est sélectionné.
+        'receiver_id_number', 'receiver_id_type', 'receiver_relation',
     ];
 
     protected $dates = ['created_at','updated_at'];
