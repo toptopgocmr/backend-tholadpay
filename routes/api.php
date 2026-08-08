@@ -85,6 +85,16 @@ $api->version('v1', function (Router $api) {
         $api->get('get_digitwace_bank_list', 'OutboundController@get_digitwace_bank_list');
         $api->get('get_digitwace_services', 'OutboundController@get_digitwace_services');
 
+        // AJOUT (2026-08-08) : consultation publique (sans connexion) d'un
+        // transfert interne par code de retrait — le bénéficiaire n'a pas
+        // forcément de compte tholadpay ; le code lui-même sert de secret
+        // (même principe qu'un code de retrait bancaire classique). Volontairement
+        // en dehors du groupe jwt.auth ci-dessous, CONTRAIREMENT à
+        // send_internal_transaction/payout_internal_transaction qui déplacent/
+        // valident réellement de l'argent et doivent rester réservés aux agents
+        // connectés. Voir App\Api\V1\Controllers\InternalTransferController.
+        $api->post('lookup_internal_transaction', 'InternalTransferController@lookup_internal_transaction');
+
         $api->group(['middleware' => 'jwt.auth'], function (Router $api) {
             // Gestion des rôles et permissions
             $api->get("role_users", 'RoleUserController@index');
@@ -132,9 +142,9 @@ $api->version('v1', function (Router $api) {
             $api->get("country_limit_funds_spec/{code}", 'CountryFundsController@fundSpec');
 
             // Transferts internes tholadpay (sans Peex/DigitWace) — voir
-            // App\Api\V1\Controllers\InternalTransferController.
+            // App\Api\V1\Controllers\InternalTransferController. lookup_internal_transaction
+            // est enregistrée plus haut, HORS jwt.auth (voir commentaire associé).
             $api->post('send_internal_transaction', 'InternalTransferController@send_internal_transaction');
-            $api->post('lookup_internal_transaction', 'InternalTransferController@lookup_internal_transaction');
             $api->post('payout_internal_transaction', 'InternalTransferController@payout_internal_transaction');
         });
         // $api->get('/clear-cache', function() {

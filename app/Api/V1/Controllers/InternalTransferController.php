@@ -57,9 +57,16 @@ class InternalTransferController extends Controller
     }
 
     /**
-     * Recherche d'un transfert interne par code de retrait — utilisé par
-     * l'agent payeur AVANT de confirmer le paiement (affiche montant/nom du
-     * bénéficiaire pour vérification).
+     * Recherche d'un transfert interne par code de retrait.
+     *
+     * AJOUT (2026-08-08) : utilisé par DEUX parcours désormais — l'agent payeur
+     * AVANT de confirmer le paiement (agent_id fourni, avertissement de pays
+     * possible), ET le bénéficiaire lui-même depuis un écran public sans
+     * connexion (voir routes/api.php : cette route est volontairement HORS
+     * jwt.auth, le code de retrait sert lui-même de secret). D'où l'ajout des
+     * informations expéditeur/pays de provenance ci-dessous, utiles aux deux
+     * mais indispensables pour que le bénéficiaire puisse vérifier qu'il s'agit
+     * bien du bon envoi avant de se déplacer en agence.
      */
     public function lookup_internal_transaction(Request $request)
     {
@@ -68,18 +75,25 @@ class InternalTransferController extends Controller
             return response()->json(['status' => 422, 'message' => 'pickup_code est requis'], 422);
         }
 
-        $transaction = Transaction::where('internal_pickup_code', $code)->first();
+        $transaction = Transaction::with(['user', 'agent', 'agent.country'])
+            ->where('internal_pickup_code', $code)->first();
         if (!$transaction) {
             return response()->json(['status' => 404, 'message' => 'Aucun transfert ne correspond à ce code.'], 404);
         }
         if ((string) $transaction->corridor_id !== '3') {
             return response()->json(['status' => 422, 'message' => 'Ce code ne correspond pas à un transfert interne.'], 422);
         }
+        // NB : on garde le rejet immédiat (409) plutôt qu'un simple champ
+        // already_paid — préserve le comportement existant côté agent
+        // (admin/mobile affichent déjà "Ce transfert a déjà été payé." dès la
+        // recherche, sans laisser accéder à l'étape de confirmation pour rien).
         if ($this->isAlreadyPaid($transaction)) {
             return response()->json(['status' => 409, 'message' => 'Ce transfert a déjà été payé.'], 409);
         }
 
         $warning = $this->countryMismatchWarning($request->get('agent_id'), $transaction);
+        $sendingAgent = $transaction->agent;
+        $sender = $transaction->user;
 
         return response()->json([
             'status' => 200,
@@ -94,6 +108,19 @@ class InternalTransferController extends Controller
                 'beneficiary_first_name' => $transaction->recipient_first_name,
                 'beneficiary_last_name' => $transaction->recipient_last_name,
                 'beneficiary_phone' => $transaction->recipient_phone,
+                // AJOUT (2026-08-08) : informations expéditeur / provenance —
+                // demande utilisateur du 2026-08-08 ("affiche aussi les
+                // informations de l'expéditeur, le pays de provenance et
+                // autres détails").
+                'sender_first_name' => $sender->first_name ?? null,
+                'sender_last_name' => $sender->last_name ?? null,
+                'sender_phone' => $sender->phone_number ?? null,
+                'sending_country' => $sendingAgent->country->name ?? null,
+                'sending_agency' => $sendingAgent->nom_commercial ?? null,
+                'amount_sent' => $transaction->amount,
+                'sent_currency' => $transaction->from_currency,
+                'sent_at' => $transaction->date_init ?? $transaction->created_at,
+                'transaction_reason' => $transaction->transaction_reason,
             ],
         ]);
     }
