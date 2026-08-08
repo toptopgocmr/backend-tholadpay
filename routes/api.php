@@ -130,6 +130,12 @@ $api->version('v1', function (Router $api) {
             $api->post('send_cash_transaction', 'OutboundController@send_cash_transaction');
             $api->get("limit_funds_spec/{from}/{to}", 'LimitFundController@fundSpec');
             $api->get("country_limit_funds_spec/{code}", 'CountryFundsController@fundSpec');
+
+            // Transferts internes tholadpay (sans Peex/DigitWace) — voir
+            // App\Api\V1\Controllers\InternalTransferController.
+            $api->post('send_internal_transaction', 'InternalTransferController@send_internal_transaction');
+            $api->post('lookup_internal_transaction', 'InternalTransferController@lookup_internal_transaction');
+            $api->post('payout_internal_transaction', 'InternalTransferController@payout_internal_transaction');
         });
         // $api->get('/clear-cache', function() {
         //     $exitCode = Artisan::call('cache:clear');

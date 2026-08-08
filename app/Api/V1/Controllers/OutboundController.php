@@ -177,7 +177,12 @@ class OutboundController extends Controller
     private function resolvePartner(Request $request): string
     {
         $partner = strtolower((string) ($request->get('partner') ?: 'peex'));
-        return in_array($partner, ['peex', 'digitwace'], true) ? $partner : 'peex';
+        // AJOUT (2026-08-08) : 'internal' — transfert 100% interne au réseau
+        // d'agences tholadpay, sans passer par Peex ni DigitWace (voir
+        // send_internal_transaction / InternalTransferController). Le
+        // bénéficiaire retire chez n'importe quel agent tholadpay du pays
+        // destinataire, via un code de retrait généré à l'envoi.
+        return in_array($partner, ['peex', 'digitwace', 'internal'], true) ? $partner : 'peex';
     }
 
     private function digitwaceClient(): DigitwaceClient
@@ -432,6 +437,19 @@ class OutboundController extends Controller
                 ],
             ]);
         }
+        if ($partner === 'internal') {
+            // AJOUT (2026-08-08) : corridor_id=3 identifie désormais les transferts
+            // internes (voir Transaction.corridor_id/nom_api, même convention que
+            // Peex=1/DigitWace=2). Contrairement aux deux autres, ce "client" n'est
+            // rattaché à aucun corridor Peex/DigitWace réel — id/nom purement
+            // internes à tholadpay.
+            return response()->json([
+                'client' => [
+                    'id' => 3,
+                    'name' => 'Interne',
+                ],
+            ]);
+        }
         return response()->json([
             'client' => [
                 'id' => 1,
@@ -511,6 +529,16 @@ class OutboundController extends Controller
                 'status' => 200,
                 'valid' => null,
                 'message' => "DigitWace ne propose pas de vérification préalable du compte ; il sera validé lors de l'envoi.",
+            ]);
+        }
+        if ($this->resolvePartner($request) === 'internal') {
+            // AJOUT (2026-08-08) : transfert interne — aucun compte externe à
+            // vérifier (le bénéficiaire retire en espèces avec un code + pièce
+            // d'identité chez n'importe quel agent tholadpay du pays).
+            return response()->json([
+                'status' => 200,
+                'valid' => null,
+                'message' => "Transfert interne : aucune vérification de compte nécessaire.",
             ]);
         }
 
@@ -660,6 +688,13 @@ class OutboundController extends Controller
                 'status' => 200,
                 'valid' => null,
                 'message' => "DigitWace ne propose pas de vérification bancaire préalable ; l'IBAN/SWIFT sera validé lors de l'envoi.",
+            ]);
+        }
+        if ($this->resolvePartner($request) === 'internal') {
+            return response()->json([
+                'status' => 200,
+                'valid' => null,
+                'message' => "Transfert interne : aucune vérification de compte nécessaire.",
             ]);
         }
 

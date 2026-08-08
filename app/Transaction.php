@@ -20,6 +20,9 @@ class Transaction extends Model
         // add_receiver_digitwace_fields_to_transactions_table. Repris automatiquement
         // à l'étape de validation si le partenaire DigitWace est sélectionné.
         'receiver_id_number', 'receiver_id_type', 'receiver_relation',
+        // Transferts internes (voir migration add_internal_transfer_fields) : code de
+        // retrait aléatoire généré à la validation si le partenaire est 'internal'.
+        'internal_pickup_code',
     ];
 
     protected $dates = ['created_at','updated_at'];

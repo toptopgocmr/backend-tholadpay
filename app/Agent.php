@@ -15,7 +15,11 @@ class Agent extends Model
      * @var array
      */
     protected $fillable = [
-        'nom_commercial', 'solde', 'solde_utilisable', 'logo', 'agent_id', 'user_id', 'is_partner', 'retail_outlet_id'
+        'nom_commercial', 'solde', 'solde_utilisable', 'logo', 'agent_id', 'user_id', 'is_partner', 'retail_outlet_id',
+        // AJOUT (2026-08-08) : pays d'opération de l'agence — voir migration
+        // add_internal_transfer_fields. Utilisé pour avertir (sans bloquer) si un
+        // agent paie un retrait interne destiné à un autre pays que le sien.
+        'country_id',
     ];
     protected $dates = ['created_at', 'updated_at'];
 
@@ -44,6 +48,11 @@ class Agent extends Model
     public function retail_outlet()
     {
         return $this->belongsTo((RetailOutlet::exists()) ? RetailOutlet::class : null);
+    }
+
+    public function country()
+    {
+        return $this->belongsTo((Country::exists()) ? Country::class : null);
     }
 
     public static function boot()
