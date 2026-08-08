@@ -76,6 +76,15 @@ $api->version('v1', function (Router $api) {
         $api->post('check_bank_account_status', 'OutboundController@check_bank_account_status');
         $api->post('get_bank_quotation', 'OutboundController@get_bank_quotation');
 
+        // Référentiels DigitWace (lecture seule — voir "WACEPAY INTEGRATION API
+        // SERVICE SPECIFICATION.pdf"), affichés côté admin/mobile uniquement
+        // quand le partenaire "DigitWace" est sélectionné à la validation.
+        $api->get('get_digitwace_relations', 'OutboundController@get_digitwace_relations');
+        $api->get('get_digitwace_reasons', 'OutboundController@get_digitwace_reasons');
+        $api->get('get_digitwace_origin_funds', 'OutboundController@get_digitwace_origin_funds');
+        $api->get('get_digitwace_bank_list', 'OutboundController@get_digitwace_bank_list');
+        $api->get('get_digitwace_services', 'OutboundController@get_digitwace_services');
+
         $api->group(['middleware' => 'jwt.auth'], function (Router $api) {
             // Gestion des rôles et permissions
             $api->get("role_users", 'RoleUserController@index');
@@ -117,6 +126,8 @@ $api->version('v1', function (Router $api) {
             // reste du parcours (get_partner, get_corridors, quotation...) est public.
             $api->post('send_transaction', 'OutboundController@send_transaction');
             $api->post('send_bank_transaction', 'OutboundController@send_bank_transaction');
+            // Retrait en espèces — DigitWace uniquement (voir OutboundController::send_cash_transaction).
+            $api->post('send_cash_transaction', 'OutboundController@send_cash_transaction');
             $api->get("limit_funds_spec/{from}/{to}", 'LimitFundController@fundSpec');
             $api->get("country_limit_funds_spec/{code}", 'CountryFundsController@fundSpec');
         });

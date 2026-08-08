@@ -6,6 +6,7 @@ use App\Api\V1\Requests\OutboundRequest;
 use App\Currency;
 use App\Helpers\RestHelper;
 use App\Http\Controllers\Controller;
+use App\Libraries\DigitwaceClient;
 use App\Libraries\PeexCorridors;
 use App\Outbound;
 use App\Sender;
@@ -37,6 +38,13 @@ use Illuminate\Support\Facades\Log;
  * Elle n'a PAS d'endpoint de cotation (quote) ni de verification de compte
  * bancaire : le taux (fxrate) et l'aval AML/CFT sont fournis par le
  * partenaire (nous) lors de l'appel, pas retournes par Peex.
+ *
+ * Integration DigitWace / WACEPAY (doc : "WACEPAY INTEGRATION API SERVICE
+ * SPECIFICATION" v2.0.0) ajoutee en 2026-08 : DigitWace est propose comme
+ * SECOND partenaire, choisi explicitement par l'agent/l'admin a l'etape de
+ * validation (voir App\Libraries\DigitwaceClient). Tous les endpoints
+ * ci-dessous acceptent desormais un parametre 'partner' ('peex' par defaut,
+ * pour ne rien casser des appelants existants, ou 'digitwace').
  */
 class OutboundController extends Controller
 {
@@ -162,6 +170,218 @@ class OutboundController extends Controller
     }
 
     /**
+     * Détermine le partenaire choisi pour cette requête. 'peex' par défaut :
+     * tous les appelants existants (avant l'ajout de DigitWace) continuent
+     * de fonctionner sans envoyer ce paramètre.
+     */
+    private function resolvePartner(Request $request): string
+    {
+        $partner = strtolower((string) ($request->get('partner') ?: 'peex'));
+        return in_array($partner, ['peex', 'digitwace'], true) ? $partner : 'peex';
+    }
+
+    private function digitwaceClient(): DigitwaceClient
+    {
+        return new DigitwaceClient();
+    }
+
+    /**
+     * Gestion d'erreur uniforme pour les appels DigitWace — miroir de
+     * peexErrorResponse() ci-dessus, adapté au format d'erreur DigitWace
+     * (doc §III : la plupart des erreurs renvoient soit {"message":"..."}
+     * soit {"messages":"..."} au niveau racine, jamais d'enveloppe imbriquée
+     * "error" comme Peex).
+     */
+    private function digitwaceErrorResponse(\Exception $e, $context = '')
+    {
+        $status = method_exists($e, 'getCode') ? $e->getCode() : 500;
+        $message = $e->getMessage();
+        $rawBody = null;
+
+        if ($e instanceof \GuzzleHttp\Exception\RequestException && $e->hasResponse()) {
+            $rawBody = (string) $e->getResponse()->getBody();
+            $status = $e->getResponse()->getStatusCode();
+            $decoded = json_decode($rawBody, true);
+            if (is_array($decoded)) {
+                $message = $decoded['message'] ?? $decoded['messages'] ?? $message;
+            }
+        }
+
+        Log::error('[DigitWace' . ($context ? " $context" : '') . '] échec appel DigitWace : HTTP ' . $status
+            . ' — message : ' . $message
+            . ($rawBody ? (' — corps brut : ' . mb_substr($rawBody, 0, 1000)) : ''));
+
+        return response()->json(['status' => $status, 'message' => $message], is_int($status) ? $status : 400);
+    }
+
+    /**
+     * Récupère (ou crée si absent) le Code expéditeur DigitWace pour ce
+     * Sender local, et le met en cache sur la ligne `senders.digitwace_code`
+     * (voir migration 2026_08_08_090000) pour ne jamais recréer deux fois le
+     * même expéditeur chez DigitWace (doc §V : "sender_code" doit être
+     * réutilisé sur toutes les transactions suivantes du même expéditeur).
+     */
+    private function ensureDigitwaceSenderCode(Sender $sender, User $user): string
+    {
+        if (!empty($sender->digitwace_code)) {
+            return $sender->digitwace_code;
+        }
+
+        // Heuristiques de correspondance entre les champs locaux (issus de
+        // l'ancienne intégration TerraPay/Peex, plus permissifs) et le schéma
+        // DigitWace, strict sur idType/civility (doc §V).
+        $idTypeRaw = strtolower((string) ($sender->type_id ?? ''));
+        $idType = (strpos($idTypeRaw, 'pass') !== false) ? 'PP' : 'CNI';
+        $gender = strtoupper((string) ($sender->sex ?? 'M')) === 'F' ? 'F' : 'M';
+
+        $payload = [
+            'type' => 'P', // Compte personnel — DigitWace supporte aussi 'B' (business), non géré ici.
+            'firstName' => $user->first_name,
+            'lastName' => $user->last_name,
+            'address' => $sender->postal_code ?: ($sender->country ?: 'N/A'),
+            'email' => $user->email ?: null,
+            'phone' => $user->phone_number,
+            'country' => $sender->country,
+            'city' => $sender->country, // Pas de champ "ville expéditeur" dédié en base — voir Note ci-dessous.
+            'gender' => $gender,
+            'civility' => 'Single', // Pas de champ "situation matrimoniale" en base ; valeur par défaut acceptée par DigitWace.
+            'idNumber' => $sender->cni_number,
+            'idType' => $idType,
+            'nationality' => $sender->country,
+            'zipcode' => $sender->postal_code,
+            'dateOfBirth' => $sender->birth_date,
+            'dateExpireId' => $sender->date_exp_id,
+            'pep' => 0,
+        ];
+
+        $response = $this->digitwaceClient()->createSender($payload);
+        $code = $response['sender']['Code'] ?? null;
+        if (!$code) {
+            throw new \RuntimeException('DigitWace /sender/create n\'a pas renvoyé de Code : ' . json_encode($response));
+        }
+
+        $sender->digitwace_code = $code;
+        $sender->save();
+
+        return $code;
+    }
+
+    /**
+     * Crée le bénéficiaire DigitWace pour cette transaction (doc §VI). Un
+     * nouveau bénéficiaire est recréé à chaque envoi (contrairement au
+     * sender, pas de mise en cache : DigitWace ne documente pas de recherche
+     * par téléphone/nom, et les infos bénéficiaire peuvent varier d'une
+     * transaction à l'autre pour un même destinataire).
+     *
+     * idNumber/idType ne sont capturés nulle part dans le formulaire actuel
+     * (Peex ne les demande pas) : receiver_id_number est donc requis
+     * explicitement côté admin/mobile quand DigitWace est sélectionné (voir
+     * send_transaction/send_bank_transaction ci-dessous), avec idType par
+     * défaut 'PP' si non précisé.
+     */
+    private function createDigitwaceBeneficiary(Request $request, string $senderCode): array
+    {
+        $idNumber = $request->get('receiver_id_number');
+        if (!$idNumber) {
+            throw new \InvalidArgumentException('receiver_id_number est requis pour un envoi via DigitWace.');
+        }
+
+        $payload = [
+            'type' => 'P',
+            'firstName' => $request->get('receiver_first_name'),
+            'lastName' => $request->get('receiver_last_name'),
+            'address' => $request->get('receiver_address') ?: $request->get('receiving_country'),
+            'phone' => $this->toInternationalPhone($request->get('receiver_phone')),
+            'mobile' => $this->toInternationalPhone($request->get('receiver_phone')),
+            'country' => $request->get('receiving_country'),
+            'city' => $request->get('receiver_city') ?: $request->get('receiving_country'),
+            'email' => $request->get('receiver_email'),
+            'idNumber' => $idNumber,
+            'idType' => $request->get('receiver_id_type') ?: 'PP',
+            'sender_code' => $senderCode,
+        ];
+
+        $response = $this->digitwaceClient()->createBeneficiary($payload);
+        $code = $response['beneficiary']['Code'] ?? null;
+        if (!$code) {
+            throw new \RuntimeException('DigitWace /beneficiary/create n\'a pas renvoyé de Code : ' . json_encode($response));
+        }
+        return ['code' => $code, 'raw' => $response];
+    }
+
+    /**
+     * Résout le payerCode DigitWace pour un pays/devise/mode de livraison
+     * donné (doc §VII Get Payer Code). Le "service" (opérateur mobile money
+     * ou "B" pour dépôt bancaire) peut être imposé par l'appelant
+     * (digitwace_service) ; à défaut, on interroge PayoutServiceCode (doc
+     * §XIV) et on prend automatiquement le premier service correspondant au
+     * mode demandé, pour ne pas obliger l'agent à choisir manuellement dans
+     * le cas le plus courant (un seul opérateur dispo pour le pays/la devise).
+     */
+    private function resolveDigitwacePayerCode(string $country, string $currency, ?string $serviceHint, bool $forBank): array
+    {
+        $client = $this->digitwaceClient();
+        $service = $serviceHint;
+
+        if (!$service) {
+            $list = $client->getPayoutServiceCode($country, $currency)['data'] ?? [];
+            $match = null;
+            foreach ($list as $entry) {
+                $isBankEntry = ($entry['ServiceCode'] ?? '') === 'B'
+                    || stripos($entry['ServiceName'] ?? '', 'BANK') !== false;
+                if ($forBank === $isBankEntry) {
+                    $match = $entry;
+                    break;
+                }
+            }
+            $match = $match ?: ($list[0] ?? null);
+            if (!$match) {
+                throw new \RuntimeException("Aucun service DigitWace disponible pour $country/$currency.");
+            }
+            $service = $match['ServiceCode'];
+        }
+
+        $payerResponse = $client->getPayerCode([
+            'toCountry' => $country,
+            'payoutService' => $service,
+            'toCurrency' => $currency,
+        ]);
+        $payerCode = $payerResponse['transaction']['PayerCode'] ?? null;
+        if (!$payerCode) {
+            throw new \RuntimeException('DigitWace /transaction/payercode n\'a pas renvoyé de PayerCode : ' . json_encode($payerResponse));
+        }
+
+        return ['payerCode' => $payerCode, 'service' => $service];
+    }
+
+    /**
+     * Champs "relation / reason / originFund" imposés par DigitWace (doc
+     * §XVI/§XVII/§XVIII) — pas de valeur libre acceptée comme chez Peex
+     * (purpose/fund_origin en texte libre). Doivent venir des listes
+     * renvoyées par get_digitwace_relations/get_digitwace_reasons/
+     * get_digitwace_origin_funds ci-dessous ; on exige donc explicitement
+     * ces 3 paramètres plutôt que de deviner une valeur par défaut qui
+     * risquerait d'être rejetée par l'API.
+     */
+    private function requireDigitwaceReferenceFields(Request $request): array
+    {
+        $relation = $request->get('relation');
+        $reason = $request->get('reason');
+        $originFund = $request->get('origin_fund');
+        $missing = array_filter([
+            'relation' => $relation,
+            'reason' => $reason,
+            'origin_fund' => $originFund,
+        ], function ($v) {
+            return empty($v);
+        });
+        if (!empty($missing)) {
+            throw new \InvalidArgumentException('Champ(s) requis pour DigitWace manquant(s) : ' . implode(', ', array_keys($missing)));
+        }
+        return ['relation' => $relation, 'reason' => $reason, 'originFund' => $originFund];
+    }
+
+    /**
      * Liste des corridors mobile money supportés par Peex (source: doc officielle,
      * pas d'endpoint Peex pour ça — voir App\Libraries\PeexCorridors).
      * À utiliser côté app pour filtrer le sélecteur de pays avant même d'appeler Peex.
@@ -190,11 +410,28 @@ class OutboundController extends Controller
      * remontait telle quelle jusqu'à l'admin, d'où le bandeau "Erreur backend : Internal
      * Server Error" au moment de valider une transaction.
      *
-     * Peex étant désormais l'unique partenaire (plus de partenaire par pays), on renvoie
-     * un descripteur statique sans dépendre d'un appel réseau tiers pour cette étape.
+     * Peex étant longtemps resté l'unique partenaire, on renvoyait un
+     * descripteur statique sans dépendre d'un appel réseau tiers pour cette
+     * étape.
+     *
+     * MàJ 2026-08 : DigitWace est désormais un second partenaire possible,
+     * choisi explicitement par l'agent/l'admin à l'étape de validation (voir
+     * TransactionController côté admin/mobile). On renvoie donc le
+     * descripteur correspondant au paramètre 'partner' reçu (toujours
+     * statique, sans appel réseau : id/name servent uniquement à alimenter
+     * corridor_id/nom_api en base, comme avant).
      * @return \Illuminate\Http\JsonResponse
      */
     public function get_partner(Request $request){
+        $partner = $this->resolvePartner($request);
+        if ($partner === 'digitwace') {
+            return response()->json([
+                'client' => [
+                    'id' => 2,
+                    'name' => 'DigitWace',
+                ],
+            ]);
+        }
         return response()->json([
             'client' => [
                 'id' => 1,
@@ -257,12 +494,28 @@ class OutboundController extends Controller
         if (!$rawPhone) {
             return response()->json(['status' => 422, 'message' => 'receiver_phone is required'], 422);
         }
-        $phone_number = $this->toInternationalPhone($rawPhone);
 
         $countryCode = $request->get('receiving_country') ?? $request->get('country_code');
         if (!$countryCode) {
             return response()->json(['status' => 422, 'message' => 'receiving_country is required'], 422);
         }
+
+        // DigitWace (doc §VIII/§IX/§X Wallet/CashPickup/Bank) ne documente
+        // aucun endpoint de vérification préalable de compte mobile money —
+        // seul Peex l'expose (clients/verify-wallet). On renvoie donc un
+        // succès neutre ('valid' => null, ni vrai ni faux) pour laisser
+        // passer l'étape 1 de validation ; le compte sera de toute façon
+        // validé par DigitWace au moment de l'envoi réel (send_transaction).
+        if ($this->resolvePartner($request) === 'digitwace') {
+            return response()->json([
+                'status' => 200,
+                'valid' => null,
+                'message' => "DigitWace ne propose pas de vérification préalable du compte ; il sera validé lors de l'envoi.",
+            ]);
+        }
+
+        $phone_number = $this->toInternationalPhone($rawPhone);
+
         if (!PeexCorridors::isMomoSupported($countryCode)) {
             return response()->json([
                 'status' => 422,
@@ -395,6 +648,21 @@ class OutboundController extends Controller
      */
     public function check_bank_account_status(Request $request)
     {
+        // DigitWace ne documente pas non plus de vérification bancaire
+        // préalable (seul /transaction/bank/create existe, doc §X) — mais
+        // contrairement à Peex (501 ci-dessous, conservé tel quel pour ne
+        // rien changer à son comportement existant), on renvoie ici un
+        // succès neutre pour ne pas bloquer l'étape 1 de validation côté
+        // admin (TransactionController::update() attend `status === 200`
+        // pour avancer à l'étape suivante).
+        if ($this->resolvePartner($request) === 'digitwace') {
+            return response()->json([
+                'status' => 200,
+                'valid' => null,
+                'message' => "DigitWace ne propose pas de vérification bancaire préalable ; l'IBAN/SWIFT sera validé lors de l'envoi.",
+            ]);
+        }
+
         return response()->json([
             'status' => 501,
             'message' => "La verification de compte bancaire n'est pas disponible dans l'API Peex documentee actuellement (aucun endpoint /clients/verify_bank). "
@@ -477,6 +745,10 @@ class OutboundController extends Controller
 
         if (!$user || !$sender) {
             return response()->json(['status' => 422, 'message' => 'user or sender not found'], 422);
+        }
+
+        if ($this->resolvePartner($request) === 'digitwace') {
+            return $this->sendDigitwaceWalletTransaction($request, $user, $sender);
         }
 
         $phone_number = $this->toInternationalPhone($request->get('receiver_phone'));
@@ -585,6 +857,10 @@ class OutboundController extends Controller
             return response()->json(['status' => 422, 'message' => 'user or sender not found'], 422);
         }
 
+        if ($this->resolvePartner($request) === 'digitwace') {
+            return $this->sendDigitwaceBankTransaction($request, $user, $sender);
+        }
+
         $bankIban = $request->get('bank_iban') ?: $request->get('bankaccountno');
         $bankSwift = $request->get('bank_swift') ?: $request->get('sortcode');
         $bankAddress = $request->get('bank_address') ?: $request->get('address');
@@ -662,6 +938,249 @@ class OutboundController extends Controller
     }
 
     /**
+     * Orchestration DigitWace pour un envoi mobile money (doc §VIII Wallet) :
+     * 1) sender (créé/réutilisé, voir ensureDigitwaceSenderCode)
+     * 2) beneficiary (créé à chaque envoi, voir createDigitwaceBeneficiary)
+     * 3) payerCode (résolu via PayoutServiceCode + GetPayerCode, voir
+     *    resolveDigitwacePayerCode)
+     * 4) POST /transaction/wallet/create
+     * Réponse normalisée dans la même enveloppe stable que Peex
+     * (status/track_id/reference) pour que admin/mobile n'aient pas besoin
+     * de connaître le partenaire réellement utilisé.
+     */
+    private function sendDigitwaceWalletTransaction(Request $request, User $user, Sender $sender)
+    {
+        $phone = $this->toInternationalPhone($request->get('receiver_phone'));
+        if (!$phone) {
+            return response()->json(['status' => 422, 'message' => 'receiver_phone is required'], 422);
+        }
+        $receivingCountry = $request->get('receiving_country');
+        if (!$receivingCountry) {
+            return response()->json(['status' => 422, 'message' => 'receiving_country is required'], 422);
+        }
+        $fromCurrency = $request->get('sendingCurrency') ?: $request->get('currency') ?: 'XAF';
+
+        try {
+            $refFields = $this->requireDigitwaceReferenceFields($request);
+            $senderCode = $this->ensureDigitwaceSenderCode($sender, $user);
+            $beneficiary = $this->createDigitwaceBeneficiary($request, $senderCode);
+            $payer = $this->resolveDigitwacePayerCode($receivingCountry, $fromCurrency, $request->get('digitwace_service'), false);
+
+            $dial = PeexCorridors::list()[strtoupper($receivingCountry)]['dial'] ?? null;
+            $localNumber = ($dial && strpos($phone, $dial) === 0) ? substr($phone, strlen($dial)) : ltrim($phone, '+');
+
+            $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
+
+            $response = $this->digitwaceClient()->createWalletTransaction([
+                'payerCode' => $payer['payerCode'],
+                'amountToPaid' => floatval($request->get('amount')),
+                'senderCode' => $senderCode,
+                'beneficiaryCode' => $beneficiary['code'],
+                'fromCurrency' => $fromCurrency,
+                'mobileReceiveNumber' => $localNumber,
+                'fromCountry' => $sender->country,
+                'originFund' => $refFields['originFund'],
+                'reason' => $refFields['reason'],
+                'relation' => $refFields['relation'],
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['status' => 422, 'message' => $e->getMessage()], 422);
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->digitwaceErrorResponse($e, 'send_transaction');
+        } catch (\Exception $e) {
+            Log::error('[DigitWace send_transaction] ' . $e->getMessage());
+            return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
+        }
+
+        return response()->json($this->normalizeDigitwaceTransactionResponse($response, $trackId));
+    }
+
+    /**
+     * Orchestration DigitWace pour un virement bancaire (doc §X Bank) —
+     * miroir de sendDigitwaceWalletTransaction ci-dessus, avec en plus la
+     * résolution du bankId DigitWace (obligatoire, doc §X) : soit fourni
+     * explicitement par l'appelant ('bank_id', recommandé — voir
+     * get_digitwace_bank_list ci-dessous pour permettre à l'agent de choisir
+     * la bonne banque dans l'UI), soit résolu au mieux par correspondance de
+     * nom sur la liste DigitWace du pays si seul 'bank_name' est fourni.
+     */
+    private function sendDigitwaceBankTransaction(Request $request, User $user, Sender $sender)
+    {
+        $bankIban = $request->get('bank_iban') ?: $request->get('bankaccountno');
+        $bankSwift = $request->get('bank_swift') ?: $request->get('sortcode');
+        if (!$bankIban) {
+            return response()->json(['status' => 422, 'message' => 'bank_iban is required'], 422);
+        }
+        $receivingCountry = $request->get('receiving_country') ?: $request->get('to_country');
+        if (!$receivingCountry) {
+            return response()->json(['status' => 422, 'message' => 'receiving_country is required'], 422);
+        }
+        $fromCurrency = $request->get('sendingCurrency') ?: $request->get('currency') ?: 'XAF';
+        $bankName = $request->get('bank_name') ?: $request->get('bankname');
+
+        try {
+            $refFields = $this->requireDigitwaceReferenceFields($request);
+            $senderCode = $this->ensureDigitwaceSenderCode($sender, $user);
+            $beneficiary = $this->createDigitwaceBeneficiary($request, $senderCode);
+            $payer = $this->resolveDigitwacePayerCode($receivingCountry, $fromCurrency, $request->get('digitwace_service'), true);
+
+            $bankId = $request->get('bank_id');
+            if (!$bankId && $bankName) {
+                $banks = $this->digitwaceClient()->getBankList($receivingCountry, $payer['payerCode'])['data'] ?? [];
+                foreach ($banks as $bank) {
+                    if (stripos($bank['BankName'] ?? '', $bankName) !== false) {
+                        $bankId = $bank['BankID'];
+                        break;
+                    }
+                }
+            }
+            if (!$bankId) {
+                return response()->json([
+                    'status' => 422,
+                    'message' => "bank_id est requis pour DigitWace (voir get_digitwace_bank_list?country=$receivingCountry&payer_code={$payer['payerCode']}).",
+                ], 422);
+            }
+
+            $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
+
+            $response = $this->digitwaceClient()->createBankTransaction([
+                'payerCode' => $payer['payerCode'],
+                'amountToPaid' => floatval($request->get('amount')),
+                'senderCode' => $senderCode,
+                'fromCurrency' => $fromCurrency,
+                'beneficiaryCode' => $beneficiary['code'],
+                'bankAccount' => $bankIban,
+                'bankName' => $bankName ?: 'N/A',
+                'bankId' => (int) $bankId,
+                'bankSwCode' => $bankSwift ?: 'N/A',
+                'bankBranch' => $request->get('bank_branch') ?: '',
+                'fromCountry' => $sender->country,
+                'comment' => $trackId,
+                'originFund' => $refFields['originFund'],
+                'reason' => $refFields['reason'],
+                'relation' => $refFields['relation'],
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['status' => 422, 'message' => $e->getMessage()], 422);
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->digitwaceErrorResponse($e, 'send_bank_transaction');
+        } catch (\Exception $e) {
+            Log::error('[DigitWace send_bank_transaction] ' . $e->getMessage());
+            return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
+        }
+
+        return response()->json($this->normalizeDigitwaceTransactionResponse($response, $trackId));
+    }
+
+    /**
+     * POST /transaction/cash/create — retrait en espèces (doc §IX CashPickup).
+     * Capacité propre à DigitWace : Peex ne propose pas ce mode de livraison,
+     * cet endpoint renvoie donc une erreur explicite si 'partner' != 'digitwace'
+     * plutôt que de silencieusement tenter d'envoyer via Peex.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function send_cash_transaction(Request $request)
+    {
+        if ($this->resolvePartner($request) !== 'digitwace') {
+            return response()->json([
+                'status' => 422,
+                'message' => 'Le retrait en espèces (cash pickup) n\'est disponible que via le partenaire DigitWace.',
+            ], 422);
+        }
+
+        $user = User::find($request->get('user_id'));
+        $sender = Sender::find($request->get('sender_id'));
+        if (!$user || !$sender) {
+            return response()->json(['status' => 422, 'message' => 'user or sender not found'], 422);
+        }
+
+        $phone = $this->toInternationalPhone($request->get('receiver_phone'));
+        if (!$phone) {
+            return response()->json(['status' => 422, 'message' => 'receiver_phone is required'], 422);
+        }
+        $receivingCountry = $request->get('receiving_country');
+        $receivingCity = $request->get('receiver_city');
+        $question = $request->get('security_question');
+        $responseAnswer = $request->get('security_answer');
+        if (!$receivingCountry || !$receivingCity || !$question || !$responseAnswer) {
+            return response()->json([
+                'status' => 422,
+                'message' => 'receiving_country, receiver_city, security_question et security_answer sont requis pour un retrait en espèces DigitWace.',
+            ], 422);
+        }
+        $fromCurrency = $request->get('sendingCurrency') ?: $request->get('currency') ?: 'XAF';
+        $toCurrency = $request->get('receivingCurrency') ?: $fromCurrency;
+
+        try {
+            $refFields = $this->requireDigitwaceReferenceFields($request);
+            $senderCode = $this->ensureDigitwaceSenderCode($sender, $user);
+            $beneficiary = $this->createDigitwaceBeneficiary($request, $senderCode);
+
+            $collection = $this->digitwaceClient()->getCollectionCode([
+                'toCountry' => $receivingCountry,
+                'fromCurrency' => $fromCurrency,
+                'toCurrency' => $toCurrency,
+                'payercode' => $request->get('digitwace_payer_code'),
+            ]);
+            $collectionCode = $request->get('payout_collection_code')
+                ?: ($collection['messages'][0]['CollectionCode'] ?? null);
+            if (!$collectionCode) {
+                return response()->json([
+                    'status' => 422,
+                    'message' => 'Aucun point de retrait (collection code) DigitWace trouvé pour cette ville ; précisez payout_collection_code explicitement.',
+                ], 422);
+            }
+
+            $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
+
+            $response = $this->digitwaceClient()->createCashTransaction([
+                'payoutCollectionCode' => $collectionCode,
+                'toCurrency' => $toCurrency,
+                'toCity' => $receivingCity,
+                'toCountry' => $receivingCountry,
+                'amountToPaid' => floatval($request->get('amount')),
+                'senderCode' => $senderCode,
+                'beneficiaryCode' => $beneficiary['code'],
+                'fromCurrency' => $fromCurrency,
+                'mobileTopup' => $phone,
+                'fromCountry' => $sender->country,
+                'originFund' => $refFields['originFund'],
+                'reason' => $refFields['reason'],
+                'question' => $question,
+                'response' => $responseAnswer,
+                'relation' => $refFields['relation'],
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['status' => 422, 'message' => $e->getMessage()], 422);
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->digitwaceErrorResponse($e, 'send_cash_transaction');
+        } catch (\Exception $e) {
+            Log::error('[DigitWace send_cash_transaction] ' . $e->getMessage());
+            return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
+        }
+
+        return response()->json($this->normalizeDigitwaceTransactionResponse($response, $trackId));
+    }
+
+    /**
+     * Normalise une réponse DigitWace (wallet/bank/cash create, formats
+     * "reference" légèrement différents selon l'endpoint — voir doc §VIII/
+     * §IX/§X) dans la même enveloppe stable que Peex (status/track_id/
+     * reference), consommée telle quelle par admin/mobile.
+     */
+    private function normalizeDigitwaceTransactionResponse(array $response, string $fallbackTrackId): array
+    {
+        $tx = $response['transaction'] ?? [];
+        $reference = $tx['reference'] ?? $fallbackTrackId;
+        $digitwaceStatus = $tx['status'] ?? ($response['stauts'] ?? ($response['status'] ?? null));
+        $response['status'] = 200;
+        $response['track_id'] = $reference;
+        $response['reference'] = $reference;
+        $response['digitwace_status'] = $digitwaceStatus;
+        return $response;
+    }
+
+    /**
      * GET /clients/all_requests (Remittance, bancaire) ou /disbursement/all_requests
      * (Disbursement, mobile money) — statut d'une transaction.
      * NB: Peex ne conserve ces infos que 3 jours (limite documentee).
@@ -671,6 +1190,22 @@ class OutboundController extends Controller
         $trackId = $request->get('track_id') ?: $request->get('referenceID');
         if (!$trackId) {
             return response()->json(['status' => 422, 'message' => 'track_id is required'], 422);
+        }
+
+        // GET /transaction/status/{reference} (doc §XI) — DigitWace determine le
+        // partenaire d'origine via 'partner', ou via 'client_id'/corridor_id=2
+        // envoyé par les appelants existants (admin checkStatusOfTransaction,
+        // qui connaît déjà le partenaire réellement utilisé à l'envoi, stocké
+        // sur transactions.corridor_id/nom_api).
+        $clientId = $request->get('client_id');
+        $isDigitwace = $this->resolvePartner($request) === 'digitwace' || (string) $clientId === '2';
+        if ($isDigitwace) {
+            try {
+                $response = $this->digitwaceClient()->getStatus($trackId);
+            } catch (\GuzzleHttp\Exception\RequestException $e) {
+                return $this->digitwaceErrorResponse($e, 'check_transaction_status');
+            }
+            return response()->json($response);
         }
 
         // FIX (2026-07-06) : Peex expose DEUX endpoints "Get All Requests" distincts,
@@ -699,5 +1234,109 @@ class OutboundController extends Controller
         }
 
         return response()->json(json_decode($response->getBody()->getContents(), true));
+    }
+
+    // ------------------------------------------------------------------
+    // Référentiels DigitWace — utilisés par les sélecteurs admin/mobile
+    // affichés uniquement quand le partenaire "DigitWace" est choisi (voir
+    // requireDigitwaceReferenceFields ci-dessus : ces valeurs, contrairement
+    // à Peex, ne sont pas du texte libre mais doivent venir de ces listes).
+    // ------------------------------------------------------------------
+
+    /**
+     * GET /transaction/relation (doc §XVI) — liste des relations
+     * sender/bénéficiaire acceptées par DigitWace.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function get_digitwace_relations(Request $request)
+    {
+        try {
+            $response = $this->digitwaceClient()->getRelation();
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->digitwaceErrorResponse($e, 'get_digitwace_relations');
+        }
+        return response()->json(['status' => 200, 'data' => $response]);
+    }
+
+    /**
+     * GET /transaction/reason/{businessType} (doc §XVIII).
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function get_digitwace_reasons(Request $request)
+    {
+        $businessType = $request->get('business_type') ?: 'p2p';
+        try {
+            $response = $this->digitwaceClient()->getReason($businessType);
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->digitwaceErrorResponse($e, 'get_digitwace_reasons');
+        }
+        return response()->json(['status' => 200, 'data' => $response]);
+    }
+
+    /**
+     * GET /transaction/origin_fund/{businessType} (doc §XVII).
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function get_digitwace_origin_funds(Request $request)
+    {
+        $businessType = $request->get('business_type') ?: 'p2p';
+        try {
+            $response = $this->digitwaceClient()->getOriginFund($businessType);
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->digitwaceErrorResponse($e, 'get_digitwace_origin_funds');
+        }
+        return response()->json(['status' => 200, 'data' => $response]);
+    }
+
+    /**
+     * POST /transaction/bank/list (doc §XIII) — nécessite d'abord un
+     * payerCode, résolu automatiquement ici si non fourni (voir
+     * resolveDigitwacePayerCode) pour permettre à l'UI de n'avoir à fournir
+     * que le pays.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function get_digitwace_bank_list(Request $request)
+    {
+        $country = $request->get('country');
+        if (!$country) {
+            return response()->json(['status' => 422, 'message' => 'country is required'], 422);
+        }
+        $currency = $request->get('currency') ?: 'XAF';
+        $payerCode = $request->get('payer_code');
+
+        try {
+            if (!$payerCode) {
+                $payerCode = $this->resolveDigitwacePayerCode($country, $currency, null, true)['payerCode'];
+            }
+            $response = $this->digitwaceClient()->getBankList($country, $payerCode);
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->digitwaceErrorResponse($e, 'get_digitwace_bank_list');
+        } catch (\Exception $e) {
+            return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
+        }
+        return response()->json(['status' => 200, 'payer_code' => $payerCode, 'data' => $response['data'] ?? []]);
+    }
+
+    /**
+     * POST /transaction/payoutServiceCode (doc §XIV) — liste des opérateurs/
+     * modes de livraison disponibles pour un pays/devise donnés, à afficher
+     * en option côté admin/mobile pour surcharger la sélection automatique
+     * (voir resolveDigitwacePayerCode) quand plusieurs opérateurs mobile
+     * money coexistent pour le même pays.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function get_digitwace_services(Request $request)
+    {
+        $country = $request->get('country');
+        $currency = $request->get('currency');
+        if (!$country || !$currency) {
+            return response()->json(['status' => 422, 'message' => 'country and currency are required'], 422);
+        }
+        try {
+            $response = $this->digitwaceClient()->getPayoutServiceCode($country, $currency);
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->digitwaceErrorResponse($e, 'get_digitwace_services');
+        }
+        return response()->json(['status' => 200, 'data' => $response['data'] ?? []]);
     }
 }
