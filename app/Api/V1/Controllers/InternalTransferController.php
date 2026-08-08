@@ -90,6 +90,10 @@ class InternalTransferController extends Controller
         if ($this->isAlreadyPaid($transaction)) {
             return response()->json(['status' => 409, 'message' => 'Ce transfert a déjà été payé.'], 409);
         }
+        if ($this->isRejected($transaction)) {
+            return response()->json(['status' => 409, 'message' => 'Ce transfert a été rejeté (motif : '
+                . $this->rejectionReasonLabel($transaction->rejection_reason) . ').'], 409);
+        }
 
         $agentId = $request->get('agent_id');
         $warning = $this->countryMismatchWarning($agentId, $transaction);
@@ -172,6 +176,10 @@ class InternalTransferController extends Controller
                 if ($this->isAlreadyPaid($tx)) {
                     throw new \RuntimeException('Ce transfert a déjà été payé.');
                 }
+                if ($this->isRejected($tx)) {
+                    throw new \RuntimeException('Ce transfert a été rejeté (motif : '
+                        . $this->rejectionReasonLabel($tx->rejection_reason) . '), impossible de le payer.');
+                }
 
                 Inbound::create([
                     'remitance_purpose' => 'Retrait interne',
@@ -212,12 +220,105 @@ class InternalTransferController extends Controller
         ]);
     }
 
+    /**
+     * Rejet d'un retrait interne par l'agent payeur — demande utilisateur du
+     * 2026-08-08 : "donner la possibilité d'annuler ou rejeter [un retrait
+     * interne] en donnant la raison du rejet (nom pas conforme, identité, ou
+     * autre raison valable)". Même verrouillage que payout_internal_transaction
+     * pour éviter qu'un transfert soit payé et rejeté en même temps par deux
+     * agents.
+     *
+     * NB (décision par défaut) : AUCUN montant n'est déplacé automatiquement —
+     * cohérent avec le reste du règlement entre agences pour les transferts
+     * internes, qui se fait hors application. Si un remboursement automatique
+     * de l'agence expéditrice est souhaité, le dire pour l'ajouter.
+     */
+    public function reject_internal_transaction(Request $request)
+    {
+        $code = strtoupper(trim((string) $request->get('pickup_code')));
+        $agentId = $request->get('agent_id');
+        $reason = $request->get('rejection_reason');
+        $note = trim((string) $request->get('rejection_note'));
+        $validReasons = array_keys(self::REJECTION_REASONS);
+
+        if (!$code || !$agentId || !$reason) {
+            return response()->json(['status' => 422, 'message' => 'pickup_code, agent_id et rejection_reason sont requis'], 422);
+        }
+        if (!in_array($reason, $validReasons, true)) {
+            return response()->json(['status' => 422, 'message' => 'Motif de rejet invalide.'], 422);
+        }
+        if ($reason === 'other' && !$note) {
+            return response()->json(['status' => 422, 'message' => 'Merci de préciser le motif du rejet.'], 422);
+        }
+
+        $agent = Agent::find($agentId);
+        if (!$agent) {
+            return response()->json(['status' => 422, 'message' => 'Agent introuvable.'], 422);
+        }
+
+        try {
+            $transaction = DB::transaction(function () use ($code, $agent, $reason, $note) {
+                $tx = Transaction::where('internal_pickup_code', $code)->lockForUpdate()->first();
+                if (!$tx) {
+                    throw new \RuntimeException('Aucun transfert ne correspond à ce code.');
+                }
+                if ((string) $tx->corridor_id !== '3') {
+                    throw new \RuntimeException('Ce code ne correspond pas à un transfert interne.');
+                }
+                if ($this->isAlreadyPaid($tx)) {
+                    throw new \RuntimeException('Ce transfert a déjà été payé, impossible de le rejeter.');
+                }
+                if ($this->isRejected($tx)) {
+                    throw new \RuntimeException('Ce transfert a déjà été rejeté.');
+                }
+
+                $tx->etat_transac = 'Rejected';
+                $tx->rejection_reason = $reason;
+                $tx->rejection_note = $note ?: null;
+                $tx->rejected_by_agent_id = $agent->id;
+                $tx->rejected_at = now();
+                $tx->save();
+
+                return $tx;
+            });
+        } catch (\RuntimeException $e) {
+            return response()->json(['status' => 409, 'message' => $e->getMessage()], 409);
+        } catch (\Exception $e) {
+            Log::error('[InternalTransfer reject] ' . $e->getMessage());
+            return response()->json(['status' => 500, 'message' => 'Erreur inattendue lors du rejet.'], 500);
+        }
+
+        return response()->json([
+            'status' => 200,
+            'message' => 'Retrait rejeté (motif : ' . $this->rejectionReasonLabel($reason) . ').',
+            'ranking' => $transaction->ranking,
+        ]);
+    }
+
+    // Catalogue des motifs de rejet — demande utilisateur du 2026-08-08. 'other'
+    // exige une note libre (voir reject_internal_transaction ci-dessus).
+    const REJECTION_REASONS = [
+        'name_mismatch' => "Nom du bénéficiaire non conforme",
+        'invalid_id' => "Pièce d'identité invalide ou non conforme",
+        'other' => 'Autre motif',
+    ];
+
+    private function rejectionReasonLabel($reason): string
+    {
+        return self::REJECTION_REASONS[$reason] ?? (string) $reason;
+    }
+
     private function isAlreadyPaid(Transaction $transaction): bool
     {
         if ($transaction->etat_transac === 'success') {
             return true;
         }
         return Inbound::where('transaction_id', $transaction->id)->whereNotNull('paid_at')->exists();
+    }
+
+    private function isRejected(Transaction $transaction): bool
+    {
+        return $transaction->etat_transac === 'Rejected' || !empty($transaction->rejected_at);
     }
 
     /**

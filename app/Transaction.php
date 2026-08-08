@@ -27,9 +27,13 @@ class Transaction extends Model
         // add_beneficiary_checkin_to_transactions_table) : permet à l'agent de voir une
         // liste des retraits déjà consultés par leur bénéficiaire.
         'beneficiary_checked_in_at',
+        // Rejet d'un retrait interne par l'agent payeur (voir migration
+        // add_rejection_fields_to_transactions_table / InternalTransferController::
+        // reject_internal_transaction).
+        'rejection_reason', 'rejection_note', 'rejected_by_agent_id', 'rejected_at',
     ];
 
-    protected $dates = ['created_at','updated_at','beneficiary_checked_in_at'];
+    protected $dates = ['created_at','updated_at','beneficiary_checked_in_at','rejected_at'];
 
     public function sender(){
         return $this->belongsTo((Sender::exists()) ? Sender::class : null);

@@ -146,6 +146,10 @@ $api->version('v1', function (Router $api) {
             // est enregistrée plus haut, HORS jwt.auth (voir commentaire associé).
             $api->post('send_internal_transaction', 'InternalTransferController@send_internal_transaction');
             $api->post('payout_internal_transaction', 'InternalTransferController@payout_internal_transaction');
+            // AJOUT (2026-08-08) : rejet d'un retrait interne par l'agent payeur
+            // (bénéficiaire non conforme, pièce d'identité invalide, ou autre motif) —
+            // voir InternalTransferController::reject_internal_transaction.
+            $api->post('reject_internal_transaction', 'InternalTransferController@reject_internal_transaction');
         });
         // $api->get('/clear-cache', function() {
         //     $exitCode = Artisan::call('cache:clear');
