@@ -23,9 +23,13 @@ class Transaction extends Model
         // Transferts internes (voir migration add_internal_transfer_fields) : code de
         // retrait aléatoire généré à la validation si le partenaire est 'internal'.
         'internal_pickup_code',
+        // Horodatage du "check-in" bénéficiaire depuis l'écran public (voir migration
+        // add_beneficiary_checkin_to_transactions_table) : permet à l'agent de voir une
+        // liste des retraits déjà consultés par leur bénéficiaire.
+        'beneficiary_checked_in_at',
     ];
 
-    protected $dates = ['created_at','updated_at'];
+    protected $dates = ['created_at','updated_at','beneficiary_checked_in_at'];
 
     public function sender(){
         return $this->belongsTo((Sender::exists()) ? Sender::class : null);

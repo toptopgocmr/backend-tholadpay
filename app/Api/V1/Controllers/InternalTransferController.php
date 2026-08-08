@@ -91,9 +91,22 @@ class InternalTransferController extends Controller
             return response()->json(['status' => 409, 'message' => 'Ce transfert a déjà été payé.'], 409);
         }
 
-        $warning = $this->countryMismatchWarning($request->get('agent_id'), $transaction);
+        $agentId = $request->get('agent_id');
+        $warning = $this->countryMismatchWarning($agentId, $transaction);
         $sendingAgent = $transaction->agent;
         $sender = $transaction->user;
+
+        // AJOUT (2026-08-08) : quand cette route est appelée SANS agent_id, c'est
+        // le bénéficiaire lui-même depuis l'écran public (SuiviRetraitPage), pas un
+        // agent. On horodate ce "check-in" pour que l'écran "Retrait interne" côté
+        // agent puisse lister les transferts déjà consultés par leur bénéficiaire,
+        // au lieu d'obliger l'agent à ressaisir le code à la main (demande
+        // utilisateur : "le bénéficiaire saisit le code... l'agent pourra juste
+        // cliquer sur vérifier ou rechercher depuis son interface").
+        if (!$agentId && !$transaction->beneficiary_checked_in_at) {
+            $transaction->beneficiary_checked_in_at = now();
+            $transaction->save();
+        }
 
         return response()->json([
             'status' => 200,
