@@ -23,6 +23,18 @@ sed -ri "s/:80>/:${PORT}>/g" /etc/apache2/sites-available/*.conf
 php artisan config:clear
 php artisan config:cache
 
+# AJOUT (2026-08-08) : plusieurs migrations (colonnes DigitWace sur
+# transactions/cashes, puis le reseau de transfert interne) sont restees
+# EN ATTENTE en production faute d'etre lancees manuellement apres deploiement
+# -> chaque creation de transaction echouait en 500 (Column not found), car
+# le code deploye referencait des colonnes absentes de la base reelle. On
+# lance donc les migrations a chaque demarrage du conteneur : --force est
+# necessaire car APP_ENV=production sinon Laravel demande une confirmation
+# interactive impossible ici. Sans danger a relancer meme quand il n'y a
+# rien de nouveau (Laravel ne rejoue jamais une migration deja appliquee,
+# via la table `migrations`).
+php artisan migrate --force
+
 # Railway réactive parfois mpm_event/mpm_worker en plus de mpm_prefork déjà
 # actif dans l'image php:8.1-apache (mod_php exige prefork). Deux MPM actifs
 # en même temps font planter Apache au démarrage avec :
