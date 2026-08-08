@@ -992,7 +992,11 @@ class OutboundController extends Controller
             return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
         }
 
-        return response()->json($this->normalizeDigitwaceTransactionResponse($response, $trackId));
+        $normalized = $this->normalizeDigitwaceTransactionResponse($response, $trackId);
+        // AJOUT (2026-08-08) : voir confirmDigitwaceTransaction() — étape obligatoire,
+        // sans quoi la transaction reste bloquée en "WAITING CONFIRMATION" chez DigitWace.
+        $normalized = array_merge($normalized, $this->confirmDigitwaceTransaction($normalized['reference']));
+        return response()->json($normalized);
     }
 
     /**
@@ -1069,7 +1073,9 @@ class OutboundController extends Controller
             return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
         }
 
-        return response()->json($this->normalizeDigitwaceTransactionResponse($response, $trackId));
+        $normalized = $this->normalizeDigitwaceTransactionResponse($response, $trackId);
+        $normalized = array_merge($normalized, $this->confirmDigitwaceTransaction($normalized['reference']));
+        return response()->json($normalized);
     }
 
     /**
@@ -1159,7 +1165,9 @@ class OutboundController extends Controller
             return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
         }
 
-        return response()->json($this->normalizeDigitwaceTransactionResponse($response, $trackId));
+        $normalized = $this->normalizeDigitwaceTransactionResponse($response, $trackId);
+        $normalized = array_merge($normalized, $this->confirmDigitwaceTransaction($normalized['reference']));
+        return response()->json($normalized);
     }
 
     /**
@@ -1178,6 +1186,45 @@ class OutboundController extends Controller
         $response['reference'] = $reference;
         $response['digitwace_status'] = $digitwaceStatus;
         return $response;
+    }
+
+    /**
+     * AJOUT (2026-08-08) : POST /transaction/confirm (doc §XII) — étape
+     * OBLIGATOIRE après wallet/create, bank/create ou cash/create. Confirmée
+     * par la doc elle-même : la réponse de getStatus() juste après une
+     * création montre "Status": "WAITING CONFIRMATION" (pas "PAID" ni
+     * "PROCESSING"), et le code succès 204 ("Confirm transaction") est décrit
+     * comme "generated when the transaction not confirm by Partner. You may
+     * go ahead and retry confirm API" — sans cet appel, une transaction créée
+     * chez DigitWace reste bloquée indéfiniment en attente de confirmation et
+     * n'est jamais réellement payée. Ni sendDigitwaceWalletTransaction, ni
+     * sendDigitwaceBankTransaction, ni send_cash_transaction ne l'appelaient
+     * jusqu'ici — corrigé en l'appelant systématiquement juste après un
+     * create réussi, dans les 3 méthodes.
+     *
+     * On tente 1 essai supplémentaire en cas d'échec (la doc suggère
+     * explicitement de "retry confirm API" sur le code 204), sans jamais faire
+     * échouer la réponse globale : la transaction EXISTE déjà chez DigitWace à
+     * ce stade (create a réussi) ; si confirm échoue malgré la retry, on le
+     * signale clairement dans la réponse (confirm_status/confirm_message)
+     * plutôt que de perdre l'info en silence — à surveiller côté admin/mobile,
+     * qui peuvent relancer la confirmation via check_transaction_status +
+     * un futur bouton "Confirmer" si ce cas se présente en pratique.
+     */
+    private function confirmDigitwaceTransaction(string $reference): array
+    {
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
+            try {
+                $result = $this->digitwaceClient()->confirm($reference);
+                return ['confirm_status' => 'confirmed', 'confirm_message' => $result['messages'] ?? $result['message'] ?? null];
+            } catch (\Exception $e) {
+                Log::warning('[DigitWace confirm] tentative ' . $attempt . ' échouée pour ' . $reference . ' : ' . $e->getMessage());
+                if ($attempt === 2) {
+                    return ['confirm_status' => 'failed', 'confirm_message' => $e->getMessage()];
+                }
+            }
+        }
+        return ['confirm_status' => 'failed', 'confirm_message' => 'Échec inattendu'];
     }
 
     /**
