@@ -96,6 +96,14 @@ class InternalTransferController extends Controller
         }
 
         $agentId = $request->get('agent_id');
+        // AJOUT (2026-08-08, demande utilisateur) : une agence qui a été
+        // EXPÉDITRICE d'un transfert ne peut pas également en effectuer le
+        // retrait — évite qu'une agence encaisse l'argent qu'elle vient
+        // elle-même d'envoyer (contrôle anti-fraude). Uniquement quand
+        // agent_id est fourni (donc un agent, pas le bénéficiaire public).
+        if ($this->isSameSendingAgency($agentId, $transaction)) {
+            return response()->json(['status' => 409, 'message' => 'Votre agence est l\'expéditrice de ce transfert : elle ne peut pas également en effectuer le retrait. Merci de faire payer ce retrait par une autre agence.'], 409);
+        }
         $warning = $this->countryMismatchWarning($agentId, $transaction);
         $sendingAgent = $transaction->agent;
         $sender = $transaction->user;
@@ -179,6 +187,12 @@ class InternalTransferController extends Controller
                 if ($this->isRejected($tx)) {
                     throw new \RuntimeException('Ce transfert a été rejeté (motif : '
                         . $this->rejectionReasonLabel($tx->rejection_reason) . '), impossible de le payer.');
+                }
+                // AJOUT (2026-08-08, demande utilisateur) : voir lookup_internal_transaction —
+                // même contrôle ici en défense en profondeur (au cas où ce endpoint serait
+                // appelé directement sans passer par lookup_internal_transaction).
+                if ($this->isSameSendingAgency($agent->id, $tx)) {
+                    throw new \RuntimeException('Votre agence est l\'expéditrice de ce transfert : elle ne peut pas également en effectuer le retrait. Merci de faire payer ce retrait par une autre agence.');
                 }
 
                 Inbound::create([
@@ -319,6 +333,19 @@ class InternalTransferController extends Controller
     private function isRejected(Transaction $transaction): bool
     {
         return $transaction->etat_transac === 'Rejected' || !empty($transaction->rejected_at);
+    }
+
+    /**
+     * Une agence ne peut pas payer un retrait qu'elle a elle-même envoyé —
+     * demande utilisateur du 2026-08-08 : "une agence qui a été expéditrice ne
+     * peut plus faire de retrait pour la même opération" (contrôle anti-fraude).
+     */
+    private function isSameSendingAgency($agentId, Transaction $transaction): bool
+    {
+        if (!$agentId || !$transaction->agent_id) {
+            return false;
+        }
+        return (string) $agentId === (string) $transaction->agent_id;
     }
 
     /**
