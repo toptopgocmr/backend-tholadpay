@@ -37,6 +37,12 @@ class Outbound extends Model
         return $this->hasOne(Bank::class)->latest('id');
     }
 
+    // AJOUT (2026-08-08) : retrait en espèces (Cash Pickup), 3e mode de
+    // livraison DigitWace — même logique que mobile()/bank() ci-dessus.
+    public function cash(){
+        return $this->hasOne(Cash::class)->latest('id');
+    }
+
     public static function boot()
     {
         parent::boot();
