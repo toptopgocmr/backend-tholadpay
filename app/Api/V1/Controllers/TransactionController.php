@@ -5,6 +5,8 @@ namespace App\Api\V1\Controllers;
 use App\Api\V1\Requests\TransactionRequest;
 use App\Helpers\RestHelper;
 use App\Http\Controllers\Controller;
+use App\Services\TaxCalculationService;
+use App\Tarification;
 use App\Transaction;
 
 /**
@@ -30,7 +32,30 @@ class TransactionController extends Controller
      */
     public function store(TransactionRequest $request)
     {
-        return RestHelper::store(Transaction::class, $request->all());
+        $data = $request->all();
+
+        // Calcul automatique des taxes (TTF, Commission COBAC, TVA, Timbre
+        // electronique) configurees dans la table `taxes`, appliquees au
+        // montant/frais d'envoi de la transaction. La zone est deduite de la
+        // tarification (tarif_id) utilisee, si fournie, sinon les taxes
+        // globales (zone_id null) s'appliquent.
+        $zoneId = null;
+        if (!empty($data['tarif_id'])) {
+            $tarification = Tarification::find($data['tarif_id']);
+            if ($tarification) {
+                $zoneId = $tarification->zone_id;
+            }
+        }
+
+        $taxes = (new TaxCalculationService())->calculate(
+            floatval($data['amount'] ?? 0),
+            floatval($data['frais_envoi'] ?? 0),
+            $zoneId
+        );
+
+        $data = array_merge($data, $taxes);
+
+        return RestHelper::store(Transaction::class, $data);
     }
 
     /**

@@ -31,6 +31,11 @@ class Transaction extends Model
         // add_rejection_fields_to_transactions_table / InternalTransferController::
         // reject_internal_transaction).
         'rejection_reason', 'rejection_note', 'rejected_by_agent_id', 'rejected_at',
+        // Taxes calculees automatiquement a la creation de la transaction via
+        // TaxCalculationService (voir migration add_taxes_to_transactions_table et
+        // table taxes) : TTF, Commission COBAC, TVA, Timbre electronique, leur
+        // somme (total_taxes) et le montant total du frais d'envoi TTC.
+        'ttf', 'commission_cobac', 'tva', 'timbre_electronique', 'total_taxes', 'frais_envoi_ttc',
     ];
 
     protected $dates = ['created_at','updated_at','beneficiary_checked_in_at','rejected_at'];

@@ -42,6 +42,7 @@ $api->version('v1', function (Router $api) {
         $api->resource("roles", 'RoleController');
         $api->resource("zones", 'ZoneController');
         $api->resource("tarifications", 'TarificationController');
+        $api->resource("taxes", 'TaxController');
         $api->resource("addresses", 'AddressController');
         $api->resource("towns", 'TownController');
         $api->resource("verifications", 'VerificationController');
