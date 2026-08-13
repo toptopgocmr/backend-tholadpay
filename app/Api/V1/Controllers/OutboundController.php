@@ -545,6 +545,29 @@ class OutboundController extends Controller
     }
 
     /**
+     * GET /account/balance — solde réel du compte DigitWace (doc §XIX Balance),
+     * miroir de get_peex_account() ci-dessus. Normalisé sur la même forme plate
+     * ('solde'/'currency') que la réponse Peex consommée par AdminController::
+     * index (dashboard admin), plutôt que d'exposer le format imbriqué brut de
+     * DigitWace ({"status":2000,"data":{"Balance":...,"Currency":...}}).
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function get_digitwace_account(){
+        try {
+            $response = $this->digitwaceClient()->getBalance();
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->digitwaceErrorResponse($e, 'get_digitwace_account');
+        }
+
+        $data = $response['data'] ?? [];
+        return response()->json([
+            'solde' => $data['Balance'] ?? null,
+            'currency' => $data['Currency'] ?? null,
+            'agency' => $data['Agency'] ?? null,
+        ]);
+    }
+
+    /**
      * POST /clients/verify_phoneNumber — validite du numero du beneficiaire.
      * Nouveau endpoint (n'existait pas dans l'ancienne integration).
      * @return \Illuminate\Http\JsonResponse

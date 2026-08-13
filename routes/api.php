@@ -85,6 +85,10 @@ $api->version('v1', function (Router $api) {
         $api->get('get_digitwace_origin_funds', 'OutboundController@get_digitwace_origin_funds');
         $api->get('get_digitwace_bank_list', 'OutboundController@get_digitwace_bank_list');
         $api->get('get_digitwace_services', 'OutboundController@get_digitwace_services');
+        // AJOUT (2026-08-13, demande explicite) : solde réel du compte DigitWace
+        // (doc §XIX Balance), même usage que get_peex_account ci-dessus — affiché
+        // sur le dashboard admin (voir AdminController::index / home.blade.php).
+        $api->get('get_digitwace_account', 'OutboundController@get_digitwace_account');
 
         // AJOUT (2026-08-08) : consultation publique (sans connexion) d'un
         // transfert interne par code de retrait — le bénéficiaire n'a pas
