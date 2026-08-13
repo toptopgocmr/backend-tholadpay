@@ -67,7 +67,15 @@ class TaxCalculationService
         $totalTaxes = $result['ttf'] + $result['commission_cobac'] + $result['tva'] + $result['timbre_electronique'];
 
         $result['total_taxes'] = $totalTaxes;
-        $result['frais_envoi_ttc'] = $fraisService + $totalTaxes;
+        // FIX (2026-08-13, demande explicite) : les taxes ne s'ajoutent plus au frais
+        // deja configure dans la grille tarifaire — elles sont desormais prelevees SUR
+        // ce montant (le frais affiche/configure est deja considere TTC), pas ajoutees
+        // par-dessus. Le client est donc facture exactement le frais de la grille, ni
+        // plus ni moins ; ttf/commission_cobac/tva/timbre_electronique et total_taxes
+        // restent calcules et stockes pour la comptabilite/conformite (ce que
+        // l'entreprise reverse aux impots sur ce frais), mais ne gonflent plus le
+        // montant debite au client. Avant ce fix : frais_envoi_ttc = frais + taxes.
+        $result['frais_envoi_ttc'] = $fraisService;
 
         return $result;
     }
