@@ -38,7 +38,18 @@ class SenderRequest extends FormRequest
             'sex'=>'',
             'valid',
             'cni_picture'=>'nullable|min:0|max:255',
-            'justif_picture'=>'nullable|min:0|max:255'
+            'justif_picture'=>'nullable|min:0|max:255',
+            // Compte Personnel/Business DigitWace (doc §V) — voir migration
+            // add_business_fields_to_senders_table. 'sender_type' facultatif ('P' par
+            // défaut côté modèle) ; les champs business ne sont vérifiés à l'envoi que
+            // dans OutboundController::ensureDigitwaceSenderCode (pas ici, pour ne pas
+            // bloquer un sender Peex/personnel qui n'en a pas besoin).
+            'sender_type'=>'nullable|in:P,B',
+            'business_name'=>'nullable|max:255',
+            'business_type'=>'nullable|max:255',
+            'business_register_date'=>'nullable|date',
+            'business_comment'=>'nullable|max:255',
+            'email'=>'nullable|email|max:255',
         ];
         return RuleHelper::get_rules($this->method(),$rules);
     }

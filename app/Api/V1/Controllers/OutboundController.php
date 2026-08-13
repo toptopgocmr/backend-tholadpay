@@ -191,6 +191,23 @@ class OutboundController extends Controller
     }
 
     /**
+     * AJOUT (2026-08-13, demande explicite) : calcule le "businessType" combiné
+     * (p2p/b2b/b2p/p2b, en minuscules — doc §XVII/§XVIII) attendu par
+     * /transaction/reason/{businessType} et /transaction/origin_fund/{businessType}
+     * à partir du type sender ('P'/'B') et du type bénéficiaire ('P'/'B').
+     * Auparavant ces deux endpoints étaient toujours interrogés avec 'p2p' en
+     * dur (voir get_digitwace_reasons/get_digitwace_origin_funds ci-dessous),
+     * ce qui proposait de mauvais motifs/origines de fonds dès qu'un des deux
+     * côtés était Business, avec risque de rejet DigitWace (erreur 2013/2014).
+     */
+    private function resolveDigitwaceBusinessType(?string $senderType, ?string $receiverType): string
+    {
+        $s = strtoupper((string) ($senderType ?: 'P')) === 'B' ? 'b' : 'p';
+        $r = strtoupper((string) ($receiverType ?: 'P')) === 'B' ? 'b' : 'p';
+        return "{$s}2{$r}";
+    }
+
+    /**
      * Gestion d'erreur uniforme pour les appels DigitWace — miroir de
      * peexErrorResponse() ci-dessus, adapté au format d'erreur DigitWace
      * (doc §III : la plupart des erreurs renvoient soit {"message":"..."}
@@ -239,25 +256,54 @@ class OutboundController extends Controller
         $idType = (strpos($idTypeRaw, 'pass') !== false) ? 'PP' : 'CNI';
         $gender = strtoupper((string) ($sender->sex ?? 'M')) === 'F' ? 'F' : 'M';
 
+        // AJOUT (2026-08-13, demande explicite) : support des senders Business
+        // ('B', voir migration add_business_fields_to_senders_table) en plus des
+        // senders Personnels ('P', comportement historique). Doc §V Create Sender :
+        // un sender Business exige businessName/businessType/regiterBusinessDate/
+        // comment/email, et idType doit être IMPÉRATIVEMENT "RCCM" (sinon erreur
+        // DigitWace 3001 "A business transaction cannot be of any type other than
+        // RCCM"). Les champs personnels (dateOfBirth/dateExpireId/civility/gender)
+        // restent envoyés même côté Business : la doc les documente comme "du
+        // gérant de l'entreprise" ("business manager"), pas seulement du particulier.
+        $isBusiness = strtoupper((string) ($sender->sender_type ?? 'P')) === 'B';
+
         $payload = [
-            'type' => 'P', // Compte personnel — DigitWace supporte aussi 'B' (business), non géré ici.
+            'type' => $isBusiness ? 'B' : 'P',
             'firstName' => $user->first_name,
             'lastName' => $user->last_name,
             'address' => $sender->postal_code ?: ($sender->country ?: 'N/A'),
-            'email' => $user->email ?: null,
+            // Doc §V : email requis pour un compte Business. $user->email est
+            // auto-généré (phone@send-paz.com, voir transaction.page.ts::addUser),
+            // pas une vraie adresse — on privilégie donc sender->email (saisie
+            // réelle facultative, voir migration add_business_fields_to_senders_table)
+            // si renseignée.
+            'email' => $sender->email ?: ($user->email ?: null),
             'phone' => $user->phone_number,
             'country' => $sender->country,
             'city' => $sender->country, // Pas de champ "ville expéditeur" dédié en base — voir Note ci-dessous.
             'gender' => $gender,
             'civility' => 'Single', // Pas de champ "situation matrimoniale" en base ; valeur par défaut acceptée par DigitWace.
             'idNumber' => $sender->cni_number,
-            'idType' => $idType,
+            'idType' => $isBusiness ? 'RCCM' : $idType,
             'nationality' => $sender->country,
             'zipcode' => $sender->postal_code,
             'dateOfBirth' => $sender->birth_date,
             'dateExpireId' => $sender->date_exp_id,
             'pep' => 0,
         ];
+
+        if ($isBusiness) {
+            if (empty($sender->business_name) || empty($sender->business_type) || empty($sender->business_register_date)) {
+                throw new \InvalidArgumentException('business_name, business_type et business_register_date sont requis pour un sender DigitWace de type Business (voir doc §V Create Sender).');
+            }
+            $payload['businessName'] = $sender->business_name;
+            $payload['businessType'] = $sender->business_type;
+            $payload['regiterBusinessDate'] = $sender->business_register_date;
+            $payload['comment'] = $sender->business_comment ?: $sender->business_name;
+            if (empty($payload['email'])) {
+                throw new \InvalidArgumentException('email est requis pour un sender DigitWace de type Business (voir doc §V Create Sender).');
+            }
+        }
 
         $response = $this->digitwaceClient()->createSender($payload);
         $code = $response['sender']['Code'] ?? null;
@@ -291,8 +337,18 @@ class OutboundController extends Controller
             throw new \InvalidArgumentException('receiver_id_number est requis pour un envoi via DigitWace.');
         }
 
+        // AJOUT (2026-08-13, demande explicite) : bénéficiaire Business ('B', voir
+        // migration add_receiver_business_fields_to_transactions_table), en plus du
+        // bénéficiaire Personnel ('P', comportement historique). Doc §VI Create
+        // Beneficiary : un bénéficiaire Business exige businessName/businessType/
+        // expire_date, et idType doit être IMPÉRATIVEMENT "RCCM" (même contrainte
+        // que le sender — erreur DigitWace 3001 sinon). receiver_id_number sert
+        // alors de numéro d'immatriculation (RCCM/SIRET/VAT) plutôt que de pièce
+        // d'identité personnelle.
+        $isBusiness = strtoupper((string) ($request->get('receiver_type') ?: 'P')) === 'B';
+
         $payload = [
-            'type' => 'P',
+            'type' => $isBusiness ? 'B' : 'P',
             'firstName' => $request->get('receiver_first_name'),
             'lastName' => $request->get('receiver_last_name'),
             'address' => $request->get('receiver_address') ?: $request->get('receiving_country'),
@@ -302,9 +358,21 @@ class OutboundController extends Controller
             'city' => $request->get('receiver_city') ?: $request->get('receiving_country'),
             'email' => $request->get('receiver_email'),
             'idNumber' => $idNumber,
-            'idType' => $request->get('receiver_id_type') ?: 'PP',
+            'idType' => $isBusiness ? 'RCCM' : ($request->get('receiver_id_type') ?: 'PP'),
             'sender_code' => $senderCode,
         ];
+
+        if ($isBusiness) {
+            $businessName = $request->get('receiver_business_name');
+            $businessType = $request->get('receiver_business_type');
+            $expireDate = $request->get('receiver_expire_date');
+            if (empty($businessName) || empty($businessType) || empty($expireDate)) {
+                throw new \InvalidArgumentException('receiver_business_name, receiver_business_type et receiver_expire_date sont requis pour un bénéficiaire DigitWace de type Business (voir doc §VI Create Beneficiary).');
+            }
+            $payload['businessName'] = $businessName;
+            $payload['businessType'] = $businessType;
+            $payload['expire_date'] = $expireDate;
+        }
 
         $response = $this->digitwaceClient()->createBeneficiary($payload);
         $code = $response['beneficiary']['Code'] ?? null;
@@ -1152,6 +1220,19 @@ class OutboundController extends Controller
         $fromCurrency = $request->get('sendingCurrency') ?: $request->get('currency') ?: 'XAF';
         $toCurrency = $request->get('receivingCurrency') ?: $fromCurrency;
 
+        // AJOUT (2026-08-13, demande explicite) : doc §IX CashPickup / erreur
+        // DigitWace 1008 — "Only P2P operation is supported for Cash PickUp
+        // transaction type". On bloque donc explicitement tout Cash Pickup dès
+        // que le sender ou le bénéficiaire est Business, plutôt que de laisser
+        // DigitWace le rejeter en 422 après création sender/bénéficiaire.
+        $businessType = $this->resolveDigitwaceBusinessType($sender->sender_type, $request->get('receiver_type'));
+        if ($businessType !== 'p2p') {
+            return response()->json([
+                'status' => 422,
+                'message' => 'Le retrait en espèces (Cash Pickup) DigitWace n\'est disponible qu\'en P2P (particulier à particulier) — ce transfert est de type ' . strtoupper($businessType) . '. Utilisez Wallet ou Bank pour ce corridor.',
+            ], 422);
+        }
+
         try {
             $refFields = $this->requireDigitwaceReferenceFields($request);
             $senderCode = $this->ensureDigitwaceSenderCode($sender, $user);
@@ -1342,11 +1423,18 @@ class OutboundController extends Controller
 
     /**
      * GET /transaction/reason/{businessType} (doc §XVIII).
+     *
+     * FIX (2026-08-13, demande explicite) : 'business_type' n'est plus figé à
+     * 'p2p'. L'appelant peut soit le préciser explicitement ('business_type'),
+     * soit laisser ce endpoint le calculer à partir de 'sender_type' et
+     * 'receiver_type' (P/B chacun — voir resolveDigitwaceBusinessType), avec
+     * repli sur 'p2p' si rien n'est fourni (compat ascendante).
      * @return \Illuminate\Http\JsonResponse
      */
     public function get_digitwace_reasons(Request $request)
     {
-        $businessType = $request->get('business_type') ?: 'p2p';
+        $businessType = $request->get('business_type')
+            ?: $this->resolveDigitwaceBusinessType($request->get('sender_type'), $request->get('receiver_type'));
         try {
             $response = $this->digitwaceClient()->getReason($businessType);
         } catch (\GuzzleHttp\Exception\RequestException $e) {
@@ -1357,11 +1445,14 @@ class OutboundController extends Controller
 
     /**
      * GET /transaction/origin_fund/{businessType} (doc §XVII).
+     * Même logique de résolution de 'business_type' que get_digitwace_reasons
+     * ci-dessus (voir commentaire, FIX 2026-08-13).
      * @return \Illuminate\Http\JsonResponse
      */
     public function get_digitwace_origin_funds(Request $request)
     {
-        $businessType = $request->get('business_type') ?: 'p2p';
+        $businessType = $request->get('business_type')
+            ?: $this->resolveDigitwaceBusinessType($request->get('sender_type'), $request->get('receiver_type'));
         try {
             $response = $this->digitwaceClient()->getOriginFund($businessType);
         } catch (\GuzzleHttp\Exception\RequestException $e) {
