@@ -3,6 +3,7 @@
 namespace App\Console;
 
 use App\Console\Commands\BackfillCustomerRoles;
+use App\Console\Commands\BackfillTransactionTaxes;
 use App\Console\Commands\CheckSubscription;
 use App\Console\Commands\CleanupTowns;
 use App\Console\Commands\GetCurrencyRate;
@@ -24,6 +25,7 @@ class Kernel extends ConsoleKernel
         CheckSubscription::class,
         BackfillCustomerRoles::class,
         CleanupTowns::class,
+        BackfillTransactionTaxes::class,
     ];
 
     /**
