@@ -4,6 +4,7 @@ namespace App\Console;
 
 use App\Console\Commands\BackfillCustomerRoles;
 use App\Console\Commands\CheckSubscription;
+use App\Console\Commands\CleanupTowns;
 use App\Console\Commands\GetCurrencyRate;
 use App\Console\Commands\UserBirthday;
 use Illuminate\Console\Scheduling\Schedule;
@@ -22,6 +23,7 @@ class Kernel extends ConsoleKernel
         UserBirthday::class,
         CheckSubscription::class,
         BackfillCustomerRoles::class,
+        CleanupTowns::class,
     ];
 
     /**
