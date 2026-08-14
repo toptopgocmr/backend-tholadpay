@@ -55,6 +55,10 @@ class CleanupTowns extends Command
         'Brazzaville', 'Pointe-Noire', 'Dolisie', 'Nkayi', 'Ouesso', 'Owando',
         'Sibiti', 'Impfondo', 'Madingou', 'Gamboma', 'Mossendjo', 'Kinkala',
         'Djambala', 'Ewo', 'Loandjili', 'Mindouli', 'Makoua', 'Sembé',
+        // AJOUT (2026-08-14) : découverte lors du premier dry-run en prod — "Ollombo"
+        // (région des Plateaux) était rattachée à 2 vraies adresses clients et
+        // manquait de la liste blanche initiale.
+        'Ollombo',
     ];
 
     public function handle()
