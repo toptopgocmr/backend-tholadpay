@@ -219,18 +219,33 @@ class OutboundController extends Controller
         $status = method_exists($e, 'getCode') ? $e->getCode() : 500;
         $message = $e->getMessage();
         $rawBody = null;
+        // FIX (2026-08-15) : jusqu'ici, ce log ne contenait que le code HTTP et le
+        // corps de réponse — impossible de savoir, a posteriori, LEQUEL des appels
+        // enchaînés dans sendDigitwace*/send_cash_transaction (sender/create,
+        // beneficiary/create, payercode, bank/list, wallet|bank|cash/create,
+        // confirm) a réellement échoué, puisqu'ils sont tous capturés par le même
+        // bloc try/catch avec un $context générique ('send_transaction',
+        // 'send_bank_transaction', ...). On journalise désormais la méthode + l'URL
+        // exacte de la requête en échec (disponible sur la RequestException via
+        // getRequest()), ce qui permet de diagnostiquer précisément un futur
+        // incident (ex: "accès restreint") sans deviner l'étape en cause.
+        $requestUrl = null;
 
-        if ($e instanceof \GuzzleHttp\Exception\RequestException && $e->hasResponse()) {
-            $rawBody = (string) $e->getResponse()->getBody();
-            $status = $e->getResponse()->getStatusCode();
-            $decoded = json_decode($rawBody, true);
-            if (is_array($decoded)) {
-                $message = $decoded['message'] ?? $decoded['messages'] ?? $message;
+        if ($e instanceof \GuzzleHttp\Exception\RequestException) {
+            $requestUrl = $e->getRequest()->getMethod() . ' ' . (string) $e->getRequest()->getUri();
+            if ($e->hasResponse()) {
+                $rawBody = (string) $e->getResponse()->getBody();
+                $status = $e->getResponse()->getStatusCode();
+                $decoded = json_decode($rawBody, true);
+                if (is_array($decoded)) {
+                    $message = $decoded['message'] ?? $decoded['messages'] ?? $message;
+                }
             }
         }
 
         Log::error('[DigitWace' . ($context ? " $context" : '') . '] échec appel DigitWace : HTTP ' . $status
             . ' — message : ' . $message
+            . ($requestUrl ? (' — requête : ' . $requestUrl) : '')
             . ($rawBody ? (' — corps brut : ' . mb_substr($rawBody, 0, 1000)) : ''));
 
         return response()->json(['status' => $status, 'message' => $message], is_int($status) ? $status : 400);
@@ -1276,6 +1291,30 @@ class OutboundController extends Controller
                 ], 422);
             }
 
+            // FIX (2026-08-15) : 'service' est un champ obligatoire de
+            // POST /transaction/cash/create (doc §IX CashPickup — "service or
+            // wawllet to use refer in list to section services"), jamais envoyé
+            // jusqu'ici (risque de rejet DigitWace 1001/1003 "Invalid
+            // parameters"/"Data validation error" sur TOUT retrait en espèces).
+            // Même logique de résolution que resolveDigitwacePayerCode() pour
+            // wallet/bank : override explicite possible via 'digitwace_service',
+            // sinon on interroge PayoutServiceCode (doc §XIV) et on prend le
+            // premier service disponible pour ce pays/devise à défaut de mieux
+            // — DigitWace ne documente pas de filtre "service_type=cash" dans la
+            // réponse PayoutServiceCode pour distinguer précisément un service de
+            // retrait espèces d'un autre mode.
+            $cashService = $request->get('digitwace_service');
+            if (!$cashService) {
+                $serviceList = $this->digitwaceClient()->getPayoutServiceCode($receivingCountry, $toCurrency)['data'] ?? [];
+                $cashService = $serviceList[0]['ServiceCode'] ?? null;
+                if (!$cashService) {
+                    return response()->json([
+                        'status' => 422,
+                        'message' => "Aucun service DigitWace disponible pour $receivingCountry/$toCurrency ; précisez digitwace_service explicitement.",
+                    ], 422);
+                }
+            }
+
             $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
 
             $response = $this->digitwaceClient()->createCashTransaction([
@@ -1284,6 +1323,7 @@ class OutboundController extends Controller
                 'toCity' => $receivingCity,
                 'toCountry' => $receivingCountry,
                 'amountToPaid' => floatval($request->get('amount')),
+                'service' => $cashService,
                 'senderCode' => $senderCode,
                 'beneficiaryCode' => $beneficiary['code'],
                 'fromCurrency' => $fromCurrency,
@@ -1349,13 +1389,51 @@ class OutboundController extends Controller
      * plutôt que de perdre l'info en silence — à surveiller côté admin/mobile,
      * qui peuvent relancer la confirmation via check_transaction_status +
      * un futur bouton "Confirmer" si ce cas se présente en pratique.
+     *
+     * FIX (2026-08-15) : cette méthode traitait jusqu'ici TOUT appel
+     * /transaction/confirm qui répondait sans exception Guzzle (donc en HTTP
+     * 2xx) comme "confirmed", sans jamais lire le champ status/stauts du corps
+     * JSON. Or le code succès 204 décrit ci-dessus ("transaction not confirm
+     * by Partner") arrive très vraisemblablement en HTTP 200 (pas en erreur),
+     * exactement comme pour getStatus (doc §XI, exemple avec "status": 204 et
+     * transaction.Status: "WAITING CONFIRMATION"). Avec l'ancien code, ce cas
+     * était silencieusement compté comme un succès : l'admin pouvait afficher
+     * "paiement effectué avec succès" alors que la transaction restait
+     * bloquée en attente chez DigitWace.
+     *
+     * On considère désormais confirmée uniquement une réponse dont le
+     * status/stauts est un code de succès "définitif" documenté (2000, 200,
+     * 201 — "Data with reference ... is confirm successfully" dans l'exemple
+     * officiel §XII utilise "status": 2000). Tout le reste (204 explicitement,
+     * mais aussi tout code absent/inattendu — on ne prend pas le risque de
+     * deviner) déclenche la retry déjà prévue, puis remonte 'uncertain' plutôt
+     * que 'confirmed' pour que l'admin/mobile ne considèrent pas à tort la
+     * transaction comme définitivement payée.
      */
+    private const DIGITWACE_CONFIRM_SUCCESS_CODES = [2000, 200, 201, '2000', '200', '201'];
+
     private function confirmDigitwaceTransaction(string $reference): array
     {
         for ($attempt = 1; $attempt <= 2; $attempt++) {
             try {
                 $result = $this->digitwaceClient()->confirm($reference);
-                return ['confirm_status' => 'confirmed', 'confirm_message' => $result['messages'] ?? $result['message'] ?? null];
+                $message = $result['messages'] ?? $result['message'] ?? null;
+                $code = $result['status'] ?? $result['stauts'] ?? null;
+
+                if (in_array($code, self::DIGITWACE_CONFIRM_SUCCESS_CODES, true)) {
+                    return ['confirm_status' => 'confirmed', 'confirm_message' => $message, 'confirm_code' => $code];
+                }
+
+                Log::warning('[DigitWace confirm] tentative ' . $attempt . ' pour ' . $reference
+                    . ' : réponse sans exception mais code de statut non-confirmé (' . json_encode($code)
+                    . ') — message : ' . $message);
+                if ($attempt === 2) {
+                    return [
+                        'confirm_status' => 'uncertain',
+                        'confirm_message' => $message ?: 'DigitWace n\'a pas confirmé la transaction après 2 tentatives (code : ' . json_encode($code) . '). Vérifier via getStatus avant de considérer la transaction comme payée.',
+                        'confirm_code' => $code,
+                    ];
+                }
             } catch (\Exception $e) {
                 Log::warning('[DigitWace confirm] tentative ' . $attempt . ' échouée pour ' . $reference . ' : ' . $e->getMessage());
                 if ($attempt === 2) {
