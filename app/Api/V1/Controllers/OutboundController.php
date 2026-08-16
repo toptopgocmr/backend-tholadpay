@@ -834,7 +834,7 @@ class OutboundController extends Controller
             return response()->json(['status' => 422, 'message' => 'Unknown or unrated currency'], 422);
         }
 
-        $fxrate = $to->rate / $from->rate;
+        $fxrate = $from->rate / $to->rate;
         $convertedAmount = round($amount * $fxrate, 2);
 
         return response()->json([
