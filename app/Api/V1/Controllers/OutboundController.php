@@ -373,6 +373,28 @@ class OutboundController extends Controller
                 $decoded = json_decode($rawBody, true);
                 if (is_array($decoded)) {
                     $message = $decoded['message'] ?? $decoded['messages'] ?? $message;
+
+                    // FIX (2026-08-20) : sur un 422 de validation, DigitWace renvoie un
+                    // message générique au niveau racine ("Erreur de validation des
+                    // données, veuillez trouver la raison dans le message.") qui,
+                    // ironiquement, NE CONTIENT PAS la raison — le détail champ par champ
+                    // vit dans un sous-objet séparé ('errors' à la Laravel, ou parfois
+                    // 'data'/'reason'/'reasons'/'details' selon l'endpoint DigitWace). On
+                    // ne relayait jusqu'ici que ce message générique à l'admin (via
+                    // send_bank_transaction -> $p['message'] -> TransactionController::
+                    // sendtransaction -> flash 'error'), rendant l'erreur inexploitable en
+                    // pratique (voir incident transaction #82, 2026-08-20 ~17:20 UTC :
+                    // DigitWace a bien renvoyé le détail, mais celui-ci n'était visible
+                    // que dans storage/logs/laravel.log sur le conteneur, pas dans le
+                    // flux de logs Railway ni dans l'UI admin). On extrait et concatène
+                    // ici ce détail au message pour qu'il remonte jusqu'à l'admin.
+                    $detail = $decoded['errors'] ?? $decoded['data'] ?? $decoded['reason'] ?? $decoded['reasons'] ?? $decoded['details'] ?? null;
+                    if (!empty($detail)) {
+                        $detailText = is_array($detail) ? $this->flattenDigitwaceErrorDetail($detail) : (string) $detail;
+                        if ($detailText !== '' && stripos($message, $detailText) === false) {
+                            $message = rtrim($message, '. ') . ' — ' . $detailText;
+                        }
+                    }
                 }
             }
         }
@@ -383,6 +405,65 @@ class OutboundController extends Controller
             . ($rawBody ? (' — corps brut : ' . mb_substr($rawBody, 0, 1000)) : ''));
 
         return response()->json(['status' => $status, 'message' => $message], is_int($status) ? $status : 400);
+    }
+
+    /**
+     * Aplati une structure d'erreurs DigitWace (souvent un objet
+     * {champ: ["raison1", "raison2"]} façon Laravel, mais parfois une liste
+     * de chaînes ou un objet imbriqué) en une seule chaîne lisible, pour
+     * l'ajouter au message générique dans digitwaceErrorResponse() ci-dessus.
+     */
+    private function flattenDigitwaceErrorDetail($detail, int $depth = 0): string
+    {
+        if ($depth > 3) {
+            return '';
+        }
+        if (is_string($detail) || is_numeric($detail)) {
+            return (string) $detail;
+        }
+        if (!is_array($detail)) {
+            return '';
+        }
+        $parts = [];
+        foreach ($detail as $key => $value) {
+            $flat = is_array($value) ? $this->flattenDigitwaceErrorDetail($value, $depth + 1) : (string) $value;
+            if ($flat === '') {
+                continue;
+            }
+            $parts[] = is_string($key) ? "{$key}: {$flat}" : $flat;
+        }
+        return implode(' ; ', $parts);
+    }
+
+    /**
+     * Résout un nom de pays en clair (ex: 'Congo', tel que stocké sur
+     * senders.country — voir mobile transaction.page.ts::addSender qui
+     * l'écrit en dur) vers son code ISO2, via la même table
+     * PeexCorridors::list() (clé ISO2 -> ['name' => ...]) déjà utilisée
+     * ailleurs dans ce contrôleur, plutôt que de dupliquer une seconde liste
+     * de pays. Repli sur les 2 premières lettres en majuscule si aucune
+     * correspondance (mieux qu'un champ vide, DigitWace validera/rejettera
+     * lui-même si c'est incorrect — voir digitwaceErrorResponse ci-dessus qui
+     * remonte désormais le détail du rejet).
+     */
+    private function countryNameToIso2(?string $countryName): string
+    {
+        $countryName = trim((string) $countryName);
+        if ($countryName === '') {
+            return 'N/A';
+        }
+        if (strlen($countryName) === 2) {
+            // Déjà un code ISO2 (pas le cas actuellement pour les senders locaux,
+            // mais évite un aller-retour inutile si ça change un jour).
+            return strtoupper($countryName);
+        }
+        foreach (PeexCorridors::list() as $iso2 => $info) {
+            if (strcasecmp($info['name'] ?? '', $countryName) === 0) {
+                return $iso2;
+            }
+        }
+        Log::warning("[DigitWace] Pays '$countryName' absent de PeexCorridors::list() — ISO2 approximé par troncature, à vérifier si DigitWace le rejette.");
+        return strtoupper(substr($countryName, 0, 2));
     }
 
     /**
@@ -428,17 +509,32 @@ class OutboundController extends Controller
             // si renseignée.
             'email' => $sender->email ?: ($user->email ?: null),
             'phone' => $user->phone_number,
-            'country' => $sender->country,
+            // FIX (2026-08-20, incident transaction #82) : DigitWace /sender/create
+            // exige un code pays ISO2 ("The country must not be greater than 2
+            // characters.") — $sender->country est stocké en clair côté mobile
+            // (littéralement 'Congo', voir transaction.page.ts::addSender), jamais
+            // en ISO2. On le résout désormais via PeexCorridors::list() (déjà la
+            // source de vérité nom<->ISO2 utilisée ailleurs dans ce contrôleur).
+            'country' => $this->countryNameToIso2($sender->country),
             'city' => $sender->country, // Pas de champ "ville expéditeur" dédié en base — voir Note ci-dessous.
             'gender' => $gender,
             'civility' => 'Single', // Pas de champ "situation matrimoniale" en base ; valeur par défaut acceptée par DigitWace.
             'idNumber' => $sender->cni_number,
             'idType' => $isBusiness ? 'RCCM' : $idType,
-            'nationality' => $sender->country,
+            'nationality' => $this->countryNameToIso2($sender->country),
             'zipcode' => $sender->postal_code,
             'dateOfBirth' => $sender->birth_date,
             'dateExpireId' => $sender->date_exp_id,
             'pep' => 0,
+            // FIX (2026-08-20, incident transaction #82) : DigitWace /sender/create
+            // exige aussi 'occupation' et 'state' ("field must be present"), sans
+            // équivalent en base côté senders (aucune migration ne les capture).
+            // Valeurs par défaut acceptées par DigitWace, même esprit que le
+            // 'civility' => 'Single' déjà en dur ci-dessus, en attendant d'éventuels
+            // vrais champs formulaire mobile/admin si DigitWace se montre plus
+            // strict sur leur contenu à l'usage.
+            'occupation' => $sender->occupation ?: 'N/A',
+            'state' => $sender->postal_code ?: ($sender->country ?: 'N/A'),
         ];
 
         if ($isBusiness) {
@@ -452,6 +548,13 @@ class OutboundController extends Controller
             if (empty($payload['email'])) {
                 throw new \InvalidArgumentException('email est requis pour un sender DigitWace de type Business (voir doc §V Create Sender).');
             }
+        } else {
+            // FIX (2026-08-20, incident transaction #82) : 'comment' est en fait
+            // requis par DigitWace même pour un sender Personnel ('P'), pas
+            // seulement Business comme le laissait supposer le commentaire doc §V
+            // ci-dessus ("comment" listé parmi les champs Business) — l'erreur
+            // 'errors.comment' est bien remontée par l'API même hors Business.
+            $payload['comment'] = 'Envoi Send-Paz pour ' . trim($user->first_name . ' ' . $user->last_name);
         }
 
         $response = $this->digitwaceClient()->createSender($payload);
@@ -2125,6 +2228,25 @@ class OutboundController extends Controller
             }
         };
 
+        // AJOUT (2026-08-20) : le support WACEPAY a confirmé par email que
+        // l'accès sandbox nécessite un whitelisting d'IP ("elles pourront nous
+        // transmettre leur adresse IP pour whitelist dans la sandbox") — on
+        // détecte donc ici l'IP sortante RÉELLE du serveur (via un service
+        // tiers, pas une valeur devinée), pour pouvoir la transmettre
+        // directement à WACEPAY. ATTENTION : sur Railway, cette IP n'est
+        // stable dans le temps QUE si "Static Outbound IPs" est activé (plan
+        // Pro, Settings -> Networking) ; sans ça, elle peut changer à chaque
+        // redéploiement et casser à nouveau l'accès après un whitelist ponctuel.
+        $outboundIp = null;
+        $ipCheckError = null;
+        try {
+            $ipResp = (new \GuzzleHttp\Client(['timeout' => 5]))->get('https://api.ipify.org?format=json');
+            $ipData = json_decode((string) $ipResp->getBody(), true);
+            $outboundIp = $ipData['ip'] ?? null;
+        } catch (\Exception $e) {
+            $ipCheckError = $e->getMessage();
+        }
+
         $client = $this->digitwaceClient();
         $run('login+relation (GET transaction/relation)', function () use ($client) { return $client->getRelation(); });
         $run('origin_fund p2p (GET transaction/origin_fund/p2p)', function () use ($client) { return $client->getOriginFund('p2p'); });
@@ -2139,6 +2261,9 @@ class OutboundController extends Controller
             'status' => 200,
             'digitwace_url' => env('DIGITWACE_URL'),
             'digitwace_email_masked' => $maskedEmail,
+            'outbound_ip' => $outboundIp,
+            'outbound_ip_check_error' => $ipCheckError,
+            'outbound_ip_note' => 'IP sortante actuelle du serveur (via api.ipify.org). Stable uniquement si "Static Outbound IPs" est activé sur Railway (plan Pro) — sinon susceptible de changer au prochain redéploiement.',
             'checks' => $checks,
         ]);
     }
