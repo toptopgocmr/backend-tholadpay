@@ -655,22 +655,38 @@ class OutboundController extends Controller
             'sender_code' => $senderCode,
         ];
 
-        // FIX (2026-08-20, incident transaction #90) : DigitWace exige aussi 'dob'
-        // (date de naissance) et 'expire_date' (expiration de la pièce) sur TOUT
-        // bénéficiaire — pas seulement Business comme le laissait supposer la doc
-        // §VI (voir storage/logs/laravel, 19:43 UTC : "dob: The dob field must be
-        // present. ; expire_date: The expire date field must be present." sur un
-        // /beneficiary/create). Ces deux champs viennent désormais du formulaire
-        // admin (receiver_dob / receiver_expire_date, voir update.blade.php) et
-        // sont exigés explicitement plutôt que de deviner une valeur par défaut
-        // pour une donnée d'identité réelle.
+        // CORRECTIF (2026-08-20, incident transaction #81 vers la Chine) : le
+        // correctif précédent (incident #90, voir historique git) rendait 'dob'
+        // ET 'expire_date' obligatoires pour TOUT bénéficiaire DigitWace, en se
+        // basant sur une erreur 422 observée pour UNE destination précise. Or la
+        // doc officielle (WACEPAY INTEGRATION API SERVICE SPECIFICATION, §VI
+        // Create Beneficiary) est plus nuancée :
+        //   - expire_date : "Mandatory for business account" -> uniquement pour
+        //     un bénéficiaire Business, pas Personnel.
+        //   - dob : "optional required for personnal account (depend
+        //     destination)" -> optionnel, DigitWace ne l'exige que pour
+        //     CERTAINES destinations, pas toutes.
+        // En les rendant obligatoires partout, le correctif #90 bloquait donc à
+        // tort des envois vers des destinations qui n'en ont pas besoin (ex:
+        // Chine, transaction #81, échec 404/500 avant même d'atteindre
+        // DigitWace). On transmet désormais ces champs quand ils sont fournis,
+        // sans bloquer localement pour les comptes Personnels : si DigitWace les
+        // exige réellement pour une destination donnée, il renverra une erreur
+        // 422 explicite (voir digitwaceErrorResponse()) que l'admin pourra
+        // corriger au cas par cas via les champs receiver_dob/receiver_expire_date
+        // du formulaire (voir update.blade.php), plutôt que d'être bloqué
+        // systématiquement pour toutes les destinations.
         $dob = $request->get('receiver_dob');
         $expireDate = $request->get('receiver_expire_date');
-        if (empty($dob) || empty($expireDate)) {
-            throw new \InvalidArgumentException('receiver_dob et receiver_expire_date sont requis pour tout bénéficiaire DigitWace (voir doc §VI Create Beneficiary).');
+        if ($isBusiness && empty($expireDate)) {
+            throw new \InvalidArgumentException('receiver_expire_date est requis pour un bénéficiaire DigitWace de type Business (voir doc §VI Create Beneficiary).');
         }
-        $payload['dob'] = $dob;
-        $payload['expire_date'] = $expireDate;
+        if (!empty($dob)) {
+            $payload['dob'] = $dob;
+        }
+        if (!empty($expireDate)) {
+            $payload['expire_date'] = $expireDate;
+        }
 
         if ($isBusiness) {
             $businessName = $request->get('receiver_business_name');
