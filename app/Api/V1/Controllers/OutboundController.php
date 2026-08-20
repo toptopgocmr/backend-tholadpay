@@ -7,9 +7,12 @@ use App\Currency;
 use App\Helpers\RestHelper;
 use App\Http\Controllers\Controller;
 use App\Libraries\DigitwaceClient;
+use App\Libraries\PawapayClient;
+use App\Libraries\PawapayCorridors;
 use App\Libraries\PeexCorridors;
 use App\Outbound;
 use App\Sender;
+use App\Transaction;
 use App\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -45,6 +48,26 @@ use Illuminate\Support\Facades\Log;
  * validation (voir App\Libraries\DigitwaceClient). Tous les endpoints
  * ci-dessous acceptent desormais un parametre 'partner' ('peex' par defaut,
  * pour ne rien casser des appelants existants, ou 'digitwace').
+ *
+ * Integration PawaPay ajoutee en 2026-08 : PawaPay est propose comme
+ * TROISIEME partenaire payeur ('pawapay'), sur demande explicite du
+ * 2026-08-20, suite a l'email de Max Hickey (Strategic Account Executive
+ * PawaPay). Contrairement a Peex/DigitWace, PawaPay n'est integre ICI que
+ * pour le corridor Congo-Brazzaville (mobile money AIRTEL_COG/MTN_MOMO_COG,
+ * voir App\Libraries\PawapayCorridors), via l'API "Remittances" (doc :
+ * https://docs.pawapay.io/v2/api-reference/remittances/initiate-remittance).
+ * PawaPay ne propose ni virement bancaire ni retrait en especes : seul
+ * send_transaction() (mobile money) accepte partner=pawapay ; send_bank_transaction
+ * et send_cash_transaction le rejettent explicitement.
+ *
+ * IMPORTANT : au moment ou ce code est ecrit, le compte sandbox PawaPay
+ * (https://dashboard.sandbox.pawapay.io) n'est pas encore cree et aucun
+ * jeton API n'est configure (PAWAPAY_TOKEN/.env vides) — voir
+ * App\Libraries\PawapayClient. Ce code n'a donc PAS pu etre teste contre un
+ * vrai sandbox PawaPay ; a valider dès que les identifiants sandbox sont
+ * disponibles, notamment le format exact attendu pour nationality/
+ * identification.type et le corps precis du callback webhook (non confirme
+ * dans la doc publique au moment de l'integration — voir pawapay_callback()).
  */
 class OutboundController extends Controller
 {
@@ -182,12 +205,123 @@ class OutboundController extends Controller
         // send_internal_transaction / InternalTransferController). Le
         // bénéficiaire retire chez n'importe quel agent tholadpay du pays
         // destinataire, via un code de retrait généré à l'envoi.
-        return in_array($partner, ['peex', 'digitwace', 'internal'], true) ? $partner : 'peex';
+        // AJOUT (2026-08-20) : 'pawapay' — 3e partenaire payeur, mobile money
+        // uniquement, corridor Congo-Brazzaville uniquement (voir
+        // App\Libraries\PawapayCorridors et sendPawapayRemittance ci-dessous).
+        return in_array($partner, ['peex', 'digitwace', 'internal', 'pawapay'], true) ? $partner : 'peex';
     }
 
     private function digitwaceClient(): DigitwaceClient
     {
         return new DigitwaceClient();
+    }
+
+    private function pawapayClient(): PawapayClient
+    {
+        return new PawapayClient();
+    }
+
+    /**
+     * Gestion d'erreur uniforme pour les appels PawaPay — miroir de
+     * peexErrorResponse()/digitwaceErrorResponse() ci-dessus. Le format
+     * d'erreur PawaPay documenté (401/403/500) expose un champ
+     * "failureReason": {failureCode, failureMessage} — voir doc "Check
+     * remittance status". Les erreurs de validation (400) sur
+     * POST /v2/remittances ne sont pas entièrement documentées dans la doc
+     * publique consultée ; on tente donc plusieurs formes plausibles avant de
+     * se replier sur le message Guzzle brut.
+     */
+    private function pawapayErrorResponse(\Exception $e, $context = '')
+    {
+        $status = method_exists($e, 'getCode') ? $e->getCode() : 500;
+        $message = $e->getMessage();
+        $rawBody = null;
+
+        if ($e instanceof \GuzzleHttp\Exception\RequestException && $e->hasResponse()) {
+            $rawBody = (string) $e->getResponse()->getBody();
+            $status = $e->getResponse()->getStatusCode();
+            $decoded = json_decode($rawBody, true);
+            if (is_array($decoded)) {
+                $message = $decoded['failureReason']['failureMessage']
+                    ?? $decoded['failureMessage']
+                    ?? $decoded['message']
+                    ?? $decoded['error']
+                    ?? $message;
+            }
+        }
+
+        Log::error('[PawaPay' . ($context ? " $context" : '') . '] échec appel PawaPay : HTTP ' . $status
+            . ' — message : ' . $message
+            . ($rawBody ? (' — corps brut : ' . mb_substr($rawBody, 0, 1000)) : ''));
+
+        return response()->json(['status' => $status, 'message' => $message], is_int($status) ? $status : 400);
+    }
+
+    /**
+     * Enums stricts imposés par l'API Remittance PawaPay pour
+     * sender.transactionDetails.purposeOfFunds / sourceOfFunds (doc
+     * "Initiate remittance", consultée le 2026-08-20) — pas de valeur libre
+     * acceptée comme chez Peex (purpose/fund_origin en texte libre), même
+     * logique que requireDigitwaceReferenceFields() ci-dessus pour DigitWace.
+     * On exige donc explicitement ces paramètres plutôt que de deviner une
+     * valeur par défaut qui risquerait d'être rejetée par PawaPay.
+     */
+    private const PAWAPAY_PURPOSE_OF_FUNDS = [
+        'FAMILY_SUPPORT', 'MEDICAL_EXPENSES', 'TUITION_FEES', 'EDUCATION_SUPPORT',
+        'GIFT_AND_OTHER_DONATIONS', 'HOME_IMPROVEMENT', 'DEBT_SETTLEMENT', 'REAL_ESTATE',
+        'TAXES', 'SALARY', 'SAVINGS', 'PERSONAL_TRANSFER', 'OTHER',
+    ];
+
+    private const PAWAPAY_SOURCE_OF_FUNDS = [
+        'SALARY', 'SAVINGS', 'LOTTERY', 'LOAN', 'BUSINESS_INCOME', 'GIFT', 'OTHER',
+    ];
+
+    private function requirePawapayReferenceFields(Request $request): array
+    {
+        $purpose = strtoupper((string) $request->get('pawapay_purpose_of_funds', ''));
+        $source = strtoupper((string) $request->get('pawapay_source_of_funds', ''));
+
+        if (!in_array($purpose, self::PAWAPAY_PURPOSE_OF_FUNDS, true)) {
+            throw new \InvalidArgumentException(
+                'pawapay_purpose_of_funds est requis et doit être l\'une des valeurs suivantes : '
+                . implode(', ', self::PAWAPAY_PURPOSE_OF_FUNDS)
+            );
+        }
+        if (!in_array($source, self::PAWAPAY_SOURCE_OF_FUNDS, true)) {
+            throw new \InvalidArgumentException(
+                'pawapay_source_of_funds est requis et doit être l\'une des valeurs suivantes : '
+                . implode(', ', self::PAWAPAY_SOURCE_OF_FUNDS)
+            );
+        }
+
+        return ['purposeOfFunds' => $purpose, 'sourceOfFunds' => $source];
+    }
+
+    /**
+     * Convertit le type de pièce d'identité local (Sender::type_id, texte
+     * libre saisi côté mobile/admin — voir aussi la même heuristique dans
+     * ensureDigitwaceSenderCode ci-dessus) vers l'enum PawaPay
+     * sender.senderDetails.identification.type (doc "Initiate remittance") :
+     * NATIONAL_ID | PASSPORT | DRIVING_LICENSE | SOCIAL_SECURITY_ID |
+     * RESIDENCE_PERMIT. 'CNI' (carte nationale d'identité, valeur la plus
+     * courante en zone CEMAC) correspond à NATIONAL_ID.
+     */
+    private function resolvePawapayIdentificationType(?string $localTypeId): string
+    {
+        $type = strtolower((string) $localTypeId);
+        if (strpos($type, 'pass') !== false) {
+            return 'PASSPORT';
+        }
+        if (strpos($type, 'permis') !== false || strpos($type, 'driv') !== false) {
+            return 'DRIVING_LICENSE';
+        }
+        if (strpos($type, 'sejour') !== false || strpos($type, 'séjour') !== false || strpos($type, 'residence') !== false || strpos($type, 'résidence') !== false) {
+            return 'RESIDENCE_PERMIT';
+        }
+        if (strpos($type, 'secu') !== false || strpos($type, 'sécu') !== false || strpos($type, 'social') !== false) {
+            return 'SOCIAL_SECURITY_ID';
+        }
+        return 'NATIONAL_ID';
     }
 
     /**
@@ -475,8 +609,16 @@ class OutboundController extends Controller
      * À utiliser côté app pour filtrer le sélecteur de pays avant même d'appeler Peex.
      * @return \Illuminate\Http\JsonResponse
      */
-    public function get_corridors()
+    public function get_corridors(Request $request)
     {
+        // AJOUT (2026-08-20) : PawaPay ne couvre (pour l'instant) que le Congo-
+        // Brazzaville, contrairement à Peex (plusieurs dizaines de pays). Reste
+        // par défaut sur PeexCorridors (compat ascendante : aucun appelant
+        // existant n'envoie 'partner' à cet endpoint) et ne bascule sur la
+        // liste PawaPay que si explicitement demandé.
+        if ($this->resolvePartner($request) === 'pawapay') {
+            return response()->json(['corridors' => PawapayCorridors::forApp()]);
+        }
         return response()->json(['corridors' => PeexCorridors::forApp()]);
     }
 
@@ -530,6 +672,16 @@ class OutboundController extends Controller
                 'client' => [
                     'id' => 3,
                     'name' => 'Interne',
+                ],
+            ]);
+        }
+        if ($partner === 'pawapay') {
+            // AJOUT (2026-08-20) : corridor_id=4 — 3e partenaire payeur (voir doc
+            // classe ci-dessus), même convention Peex=1/DigitWace=2/Interne=3.
+            return response()->json([
+                'client' => [
+                    'id' => 4,
+                    'name' => 'PawaPay',
                 ],
             ]);
         }
@@ -888,8 +1040,12 @@ class OutboundController extends Controller
             return response()->json(['status' => 422, 'message' => 'user or sender not found'], 422);
         }
 
-        if ($this->resolvePartner($request) === 'digitwace') {
+        $partner = $this->resolvePartner($request);
+        if ($partner === 'digitwace') {
             return $this->sendDigitwaceWalletTransaction($request, $user, $sender);
+        }
+        if ($partner === 'pawapay') {
+            return $this->sendPawapayRemittance($request, $user, $sender);
         }
 
         $phone_number = $this->toInternationalPhone($request->get('receiver_phone'));
@@ -998,8 +1154,20 @@ class OutboundController extends Controller
             return response()->json(['status' => 422, 'message' => 'user or sender not found'], 422);
         }
 
-        if ($this->resolvePartner($request) === 'digitwace') {
+        $partner = $this->resolvePartner($request);
+        if ($partner === 'digitwace') {
             return $this->sendDigitwaceBankTransaction($request, $user, $sender);
+        }
+        // AJOUT (2026-08-20) : PawaPay n'est intégré ici que via l'API Remittance
+        // (destinataire type "MMO" uniquement, voir sendPawapayRemittance) — pas
+        // de virement bancaire. Rejet explicite plutôt que de laisser tomber
+        // silencieusement sur Peex (même esprit que le rejet 'digitwace'-only de
+        // send_cash_transaction ci-dessous).
+        if ($partner === 'pawapay') {
+            return response()->json([
+                'status' => 422,
+                'message' => 'Le virement bancaire n\'est pas disponible via PawaPay dans cette intégration (mobile money uniquement, voir send_transaction).',
+            ], 422);
         }
 
         $bankIban = $request->get('bank_iban') ?: $request->get('bankaccountno');
@@ -1445,6 +1613,268 @@ class OutboundController extends Controller
     }
 
     /**
+     * Orchestration PawaPay pour un envoi mobile money via l'API Remittance
+     * (POST /v2/remittances, doc "Initiate remittance"). Contrairement à
+     * Peex/DigitWace, un seul appel suffit (pas de création préalable de
+     * sender/beneficiary côté PawaPay) : tout le KYC expéditeur + destinataire
+     * est envoyé dans la même requête.
+     *
+     * Champs requis côté appelant (en plus de receiver_phone/receiving_country/
+     * amount déjà utilisés par Peex/DigitWace) :
+     *   - pawapay_operator ('AIRTEL' ou 'MTN', voir PawapayCorridors)
+     *   - pawapay_purpose_of_funds / pawapay_source_of_funds (enums stricts,
+     *     voir requirePawapayReferenceFields)
+     *   - receiver_first_name / receiver_last_name
+     * receiving_country doit être un corridor PawapayCorridors supporté (CG
+     * uniquement au moment de l'écriture de ce code).
+     */
+    private function sendPawapayRemittance(Request $request, User $user, Sender $sender)
+    {
+        $phone = $this->toInternationalPhone($request->get('receiver_phone'));
+        if (!$phone) {
+            return response()->json(['status' => 422, 'message' => 'receiver_phone is required'], 422);
+        }
+
+        $receivingCountry = strtoupper((string) $request->get('receiving_country'));
+        if (!PawapayCorridors::isSupported($receivingCountry)) {
+            return response()->json([
+                'status' => 422,
+                'message' => "Le pays $receivingCountry n'est pas un corridor mobile money supporté par PawaPay dans cette intégration.",
+                'supported_corridors' => array_keys(PawapayCorridors::list()),
+            ], 422);
+        }
+
+        $provider = PawapayCorridors::resolveProvider($receivingCountry, $request->get('pawapay_operator'));
+        if (!$provider) {
+            return response()->json([
+                'status' => 422,
+                'message' => "pawapay_operator est requis et doit être un des opérateurs supportés pour $receivingCountry : "
+                    . implode(', ', array_keys(PawapayCorridors::list()[$receivingCountry]['operators'] ?? [])),
+            ], 422);
+        }
+
+        $receiverFirstName = $request->get('receiver_first_name');
+        $receiverLastName = $request->get('receiver_last_name');
+        if (!$receiverFirstName || !$receiverLastName) {
+            return response()->json(['status' => 422, 'message' => 'receiver_first_name et receiver_last_name sont requis pour PawaPay.'], 422);
+        }
+
+        try {
+            $refFields = $this->requirePawapayReferenceFields($request);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['status' => 422, 'message' => $e->getMessage()], 422);
+        }
+
+        $currency = PawapayCorridors::currency($receivingCountry) ?: 'XAF';
+        // NB (doc Providers) : XAF ne supporte pas les décimales chez PawaPay
+        // pour AIRTEL_COG/MTN_MOMO_COG — on arrondit donc le montant à payer.
+        $amount = (string) (int) round(floatval($request->get('amount')));
+
+        $sendingCurrency = $request->get('sendingCurrency') ?: $request->get('currency') ?: $currency;
+        $sendingAmount = $request->get('sendingAmount') ?: $amount;
+
+        $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
+        $remittanceId = (string) Str::uuid();
+
+        $payload = [
+            'remittanceId' => $remittanceId,
+            'amount' => $amount,
+            'currency' => $currency,
+            'recipient' => [
+                'type' => 'MMO',
+                'accountDetails' => [
+                    'phoneNumber' => ltrim($phone, '+'),
+                    'provider' => $provider,
+                ],
+                'recipientDetails' => [
+                    'firstName' => $receiverFirstName,
+                    'lastName' => $receiverLastName,
+                ],
+            ],
+            'sender' => [
+                'transactionDetails' => [
+                    'transactionReference' => $trackId,
+                    'originalAmount' => (string) $sendingAmount,
+                    'originalCurrency' => $sendingCurrency,
+                    'buyFxRate' => (string) ($request->get('fxrate') ?: '1'),
+                    'senderFees' => (string) ($request->get('fees') ?: '0'),
+                    'purposeOfFunds' => $refFields['purposeOfFunds'],
+                    'sourceOfFunds' => $refFields['sourceOfFunds'],
+                ],
+                'senderDetails' => [
+                    'firstName' => $user->first_name,
+                    'lastName' => $user->last_name,
+                    // La doc PawaPay ne précise pas le format exact attendu pour
+                    // "nationality" (alpha-2/alpha-3/nom complet) — on envoie le
+                    // code pays local tel que stocké (Sender::country, alpha-2,
+                    // ex: "CG"), à ajuster si PawaPay le rejette une fois le
+                    // sandbox disponible (voir note en tête de classe).
+                    'nationality' => $sender->country,
+                    'phoneNumber' => ltrim((string) $this->toInternationalPhone($user->phone_number), '+'),
+                    'address' => [
+                        // Pas de champ "adresse expéditeur" dédié en base (même
+                        // lacune que DigitWace, voir ensureDigitwaceSenderCode) —
+                        // on retombe sur le code postal ou, à défaut, le pays.
+                        'addressLine' => $sender->postal_code ?: ($sender->country ?: 'N/A'),
+                        'postalCode' => $sender->postal_code ?: 'N/A',
+                        'city' => $sender->country ?: 'N/A',
+                        'country' => PawapayCorridors::iso3($sender->country) ?: (string) $sender->country,
+                    ],
+                    'identification' => [
+                        'type' => $this->resolvePawapayIdentificationType($sender->type_id),
+                        'number' => $sender->cni_number,
+                    ],
+                ],
+            ],
+            'metadata' => [
+                ['fieldName' => 'trackId', 'fieldValue' => $trackId],
+            ],
+        ];
+
+        try {
+            $response = $this->pawapayClient()->initiateRemittance($payload);
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            return $this->pawapayErrorResponse($e, 'send_transaction');
+        } catch (\Exception $e) {
+            Log::error('[PawaPay send_transaction] ' . $e->getMessage());
+            return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
+        }
+
+        return response()->json($this->normalizePawapayRemittanceResponse($response, $trackId));
+    }
+
+    /**
+     * Normalise une réponse PawaPay (POST /v2/remittances) dans la même
+     * enveloppe stable (status/track_id/reference) que Peex/DigitWace.
+     *
+     * IMPORTANT : "status" => 200 ici signifie uniquement que PawaPay a
+     * ACCEPTÉ la demande (pawapay_status = ACCEPTED) — pas que l'argent est
+     * déjà chez le bénéficiaire (traitement asynchrone, voir
+     * check_transaction_status / pawapay_callback ci-dessous). Un statut
+     * REJECTED est en revanche remonté comme une erreur 422 explicite plutôt
+     * que comme un faux succès.
+     */
+    private function normalizePawapayRemittanceResponse(array $response, string $fallbackTrackId): array
+    {
+        $remittanceId = $response['remittanceId'] ?? null;
+        $pawapayStatus = $response['status'] ?? null;
+
+        if ($pawapayStatus === 'REJECTED') {
+            return [
+                'status' => 422,
+                'message' => $response['failureReason']['failureMessage'] ?? 'Virement rejeté par PawaPay.',
+                'pawapay_status' => $pawapayStatus,
+                'track_id' => $fallbackTrackId,
+                'reference' => $remittanceId ?: $fallbackTrackId,
+            ];
+        }
+
+        $response['status'] = 200;
+        $response['track_id'] = $fallbackTrackId;
+        $response['reference'] = $remittanceId ?: $fallbackTrackId;
+        $response['pawapay_status'] = $pawapayStatus;
+        return $response;
+    }
+
+    /**
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function pawapay_callback(Request $request)
+    {
+        // AJOUT (2026-08-20) : point d'entrée pour le callback webhook PawaPay
+        // (doc "Remittance callback"), configuré côté Dashboard PawaPay ->
+        // Callback URLs (une seule URL pour tous les types de notification,
+        // voir doc). Contrairement à Peex/DigitWace (statut consulté
+        // uniquement à la demande via check_transaction_status), PawaPay pousse
+        // les changements de statut ici de façon asynchrone.
+        //
+        // NON IMPLÉMENTÉ pour l'instant : la vérification de signature
+        // RFC-9421 (headers Signature/Signature-Input/Content-Digest, voir doc
+        // "Remittance callback") — le corps JSON exact renvoyé par PawaPay
+        // n'a pas pu être confirmé dans la doc publique consultée le
+        // 2026-08-20 (voir note en tête de classe). À faire avant mise en
+        // production : (1) confirmer le schéma exact du payload avec le
+        // sandbox, (2) implémenter la vérification de signature si "Only
+        // accept signed requests" est activé côté dashboard PawaPay, pour
+        // s'assurer qu'un tiers ne peut pas falsifier un statut "COMPLETED".
+        $payload = $request->all();
+        Log::info('[PawaPay callback] payload reçu : ' . json_encode($payload));
+
+        $remittanceId = $payload['remittanceId'] ?? ($payload['data']['remittanceId'] ?? null);
+        $status = $payload['status'] ?? ($payload['data']['status'] ?? null);
+
+        if ($remittanceId) {
+            $transaction = Transaction::where('reference', $remittanceId)->first();
+            if ($transaction) {
+                $transaction->etat_transac = $status;
+                $transaction->save();
+            } else {
+                Log::warning('[PawaPay callback] aucune transaction locale trouvée pour remittanceId=' . $remittanceId);
+            }
+        }
+
+        return response()->json(['status' => 200]);
+    }
+
+    /**
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function digitwace_callback(Request $request)
+    {
+        // AJOUT (2026-08-20) : point d'entrée pour l'"API de Notification"
+        // WACEPAY/DigitWace, demandée par le support DigitWace (email du
+        // 2026-08-20 : "merci de nous transmettre l'URL... générée par votre
+        // équipe technique").
+        //
+        // IMPORTANT — À CONFIRMER : le PDF transmis avec cette demande
+        // ("WACEPAY INTEGRATION API SERVICE SPECIFICATION", v2.0.0) est
+        // IDENTIQUE à celui déjà utilisé pour construire DigitwaceClient — son
+        // sommaire va de I. Introduction à XIX. Balance et NE CONTIENT AUCUNE
+        // section Notification/SMS, aucun schéma de payload, aucun mécanisme
+        // de signature/authentification pour ce webhook. Ce n'est donc PAS le
+        // "guide de configuration des APIs de Notification" annoncé par le
+        // support — probablement une pièce jointe manquante ou erronée de leur
+        // côté. Cette méthode fait donc du best-effort à partir des seuls noms
+        // de champs confirmés ailleurs dans la doc (reference/Reference — voir
+        // §XI getStatus, §XII confirm — et Status — voir §XI, valeurs
+        // possibles : PENDING, WAITING CONFIRMATION, PROCESSING, LOCKED, PAID,
+        // CANCEL) : elle journalise tout payload reçu tel quel (pour pouvoir
+        // reconstituer le vrai schéma une fois un exemple réel reçu), puis met
+        // à jour la transaction locale correspondante si elle reconnaît un
+        // champ de référence. AUCUNE vérification d'authenticité n'est faite
+        // (le PDF ne documente ni secret partagé ni signature pour ce
+        // callback) : à durcir dès que WACEPAY confirme le mécanisme prévu,
+        // avant mise en production.
+        $payload = $request->all();
+        Log::info('[DigitWace callback] payload reçu : ' . json_encode($payload));
+
+        $reference = $payload['reference']
+            ?? $payload['Reference']
+            ?? $payload['transaction_reference']
+            ?? ($payload['transaction']['reference'] ?? null)
+            ?? ($payload['transaction']['Reference'] ?? null);
+        $status = $payload['status']
+            ?? $payload['Status']
+            ?? $payload['stauts']
+            ?? ($payload['transaction']['Status'] ?? null)
+            ?? ($payload['transaction']['status'] ?? null);
+
+        if ($reference) {
+            $transaction = Transaction::where('reference', $reference)->first();
+            if ($transaction) {
+                $transaction->etat_transac = $status;
+                $transaction->save();
+            } else {
+                Log::warning('[DigitWace callback] aucune transaction locale trouvée pour reference=' . $reference);
+            }
+        } else {
+            Log::warning('[DigitWace callback] aucun champ de référence reconnu dans le payload — schéma non confirmé, voir commentaire ci-dessus.');
+        }
+
+        return response()->json(['status' => 200]);
+    }
+
+    /**
      * GET /clients/all_requests (Remittance, bancaire) ou /disbursement/all_requests
      * (Disbursement, mobile money) — statut d'une transaction.
      * NB: Peex ne conserve ces infos que 3 jours (limite documentee).
@@ -1462,12 +1892,28 @@ class OutboundController extends Controller
         // qui connaît déjà le partenaire réellement utilisé à l'envoi, stocké
         // sur transactions.corridor_id/nom_api).
         $clientId = $request->get('client_id');
-        $isDigitwace = $this->resolvePartner($request) === 'digitwace' || (string) $clientId === '2';
+        $partner = $this->resolvePartner($request);
+        $isDigitwace = $partner === 'digitwace' || (string) $clientId === '2';
         if ($isDigitwace) {
             try {
                 $response = $this->digitwaceClient()->getStatus($trackId);
             } catch (\GuzzleHttp\Exception\RequestException $e) {
                 return $this->digitwaceErrorResponse($e, 'check_transaction_status');
+            }
+            return response()->json($response);
+        }
+
+        // AJOUT (2026-08-20) : PawaPay — GET /v2/remittances/{remittanceId} (doc
+        // "Check remittance status"). $trackId doit ici être le remittanceId
+        // PawaPay renvoyé par sendPawapayRemittance (exposé comme 'reference'
+        // dans sa réponse normalisée), pas le track_id interne — même logique
+        // que DigitWace ci-dessus, qui utilise sa propre 'reference'.
+        $isPawapay = $partner === 'pawapay' || (string) $clientId === '4';
+        if ($isPawapay) {
+            try {
+                $response = $this->pawapayClient()->getRemittanceStatus($trackId);
+            } catch (\GuzzleHttp\Exception\RequestException $e) {
+                return $this->pawapayErrorResponse($e, 'check_transaction_status');
             }
             return response()->json($response);
         }

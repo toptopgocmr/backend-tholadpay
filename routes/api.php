@@ -90,6 +90,32 @@ $api->version('v1', function (Router $api) {
         // sur le dashboard admin (voir AdminController::index / home.blade.php).
         $api->get('get_digitwace_account', 'OutboundController@get_digitwace_account');
 
+        // AJOUT (2026-08-20) : callback webhook PawaPay (doc "Remittance
+        // callback"), à configurer dans le Dashboard PawaPay -> Callback URLs
+        // une fois le sandbox créé. URL réelle (voir prefix 'api' appliqué par
+        // Dingo, pas de segment /v1/ dans le chemin — cf.
+        // mobile-tholadpay/src/app/services/host/host.service.ts::buildHost()) :
+        // https://backend-tholadpay-production.up.railway.app/api/pawapay/callback
+        // Volontairement public (hors jwt.auth) : PawaPay ne s'authentifie pas
+        // en JWT tholadpay — voir OutboundController::pawapay_callback pour la
+        // limite connue (signature RFC-9421 non vérifiée pour l'instant).
+        $api->post('pawapay/callback', 'OutboundController@pawapay_callback');
+
+        // AJOUT (2026-08-20) : callback webhook DigitWace/WACEPAY (« API de
+        // Notification », demandée par le support WACEPAY le 2026-08-20). URL
+        // réelle à transmettre à WACEPAY (même convention que pawapay/callback
+        // ci-dessus) :
+        // https://backend-tholadpay-production.up.railway.app/api/digitwace/callback
+        // IMPORTANT : au moment où ce code est écrit, le PDF transmis par
+        // WACEPAY ("WACEPAY_INTEGRATION_API_SERVICE_SPECIFICATION.pdf") ne
+        // contient AUCUNE section Notification/SMS (sommaire I à XIX, de
+        // Introduction à Balance) — c'est le même document déjà utilisé pour
+        // DigitwaceClient, pas le "guide de configuration des APIs de
+        // Notification" annoncé par le support. Voir
+        // OutboundController::digitwace_callback pour le détail de ce qui est
+        // donc une best-effort en attendant le vrai schéma.
+        $api->post('digitwace/callback', 'OutboundController@digitwace_callback');
+
         // AJOUT (2026-08-08) : consultation publique (sans connexion) d'un
         // transfert interne par code de retrait — le bénéficiaire n'a pas
         // forcément de compte tholadpay ; le code lui-même sert de secret

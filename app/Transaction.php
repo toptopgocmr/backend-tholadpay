@@ -41,6 +41,12 @@ class Transaction extends Model
         // add_receiver_business_fields_to_transactions_table et doc DigitWace
         // §VI Create Beneficiary / §XVII-XVIII.
         'receiver_type', 'receiver_business_name', 'receiver_business_type', 'receiver_expire_date', 'business_type',
+        // Saisie facultative, dès la création mobile, des champs propres à
+        // PawaPay (opérateur + motif/origine des fonds) — voir migration
+        // add_pawapay_fields_to_transactions_table. Repris automatiquement à
+        // l'étape de validation si le partenaire PawaPay est sélectionné,
+        // même principe que les champs receiver_* DigitWace ci-dessus.
+        'pawapay_operator', 'pawapay_purpose_of_funds', 'pawapay_source_of_funds',
     ];
 
     protected $dates = ['created_at','updated_at','beneficiary_checked_in_at','rejected_at'];
