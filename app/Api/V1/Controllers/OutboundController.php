@@ -627,6 +627,19 @@ class OutboundController extends Controller
         // d'identité personnelle.
         $isBusiness = strtoupper((string) ($request->get('receiver_type') ?: 'P')) === 'B';
 
+        // FIX (2026-08-20, incident transaction #90) : le formulaire admin
+        // (resources/views/transactions/update.blade.php) propose 6 valeurs pour
+        // "Type de pièce" (PP/CNI/PERMIS/NIU/RESIDENCE/CONSULAIRE) — copiées du
+        // formulaire mobile SANS jamais avoir été confirmées par DigitWace au-delà
+        // de PP/CNI (voir commentaire déjà présent dans ce blade). L'agent avait
+        // sélectionné une de ces 4 valeurs non confirmées pour la transaction #90,
+        // et DigitWace a rejeté l'envoi avec "This ID type does not exist or is
+        // disabled." On normalise donc désormais vers PP/CNI uniquement (même
+        // logique que ensureDigitwaceSenderCode() ci-dessus pour l'expéditeur) au
+        // lieu de transmettre la valeur brute du formulaire.
+        $idTypeRaw = strtoupper((string) $request->get('receiver_id_type'));
+        $idType = ($idTypeRaw === '' || $idTypeRaw === 'PP') ? 'PP' : 'CNI';
+
         $payload = [
             'type' => $isBusiness ? 'B' : 'P',
             'firstName' => $request->get('receiver_first_name'),
@@ -638,20 +651,35 @@ class OutboundController extends Controller
             'city' => $request->get('receiver_city') ?: $request->get('receiving_country'),
             'email' => $request->get('receiver_email'),
             'idNumber' => $idNumber,
-            'idType' => $isBusiness ? 'RCCM' : ($request->get('receiver_id_type') ?: 'PP'),
+            'idType' => $isBusiness ? 'RCCM' : $idType,
             'sender_code' => $senderCode,
         ];
+
+        // FIX (2026-08-20, incident transaction #90) : DigitWace exige aussi 'dob'
+        // (date de naissance) et 'expire_date' (expiration de la pièce) sur TOUT
+        // bénéficiaire — pas seulement Business comme le laissait supposer la doc
+        // §VI (voir storage/logs/laravel, 19:43 UTC : "dob: The dob field must be
+        // present. ; expire_date: The expire date field must be present." sur un
+        // /beneficiary/create). Ces deux champs viennent désormais du formulaire
+        // admin (receiver_dob / receiver_expire_date, voir update.blade.php) et
+        // sont exigés explicitement plutôt que de deviner une valeur par défaut
+        // pour une donnée d'identité réelle.
+        $dob = $request->get('receiver_dob');
+        $expireDate = $request->get('receiver_expire_date');
+        if (empty($dob) || empty($expireDate)) {
+            throw new \InvalidArgumentException('receiver_dob et receiver_expire_date sont requis pour tout bénéficiaire DigitWace (voir doc §VI Create Beneficiary).');
+        }
+        $payload['dob'] = $dob;
+        $payload['expire_date'] = $expireDate;
 
         if ($isBusiness) {
             $businessName = $request->get('receiver_business_name');
             $businessType = $request->get('receiver_business_type');
-            $expireDate = $request->get('receiver_expire_date');
-            if (empty($businessName) || empty($businessType) || empty($expireDate)) {
-                throw new \InvalidArgumentException('receiver_business_name, receiver_business_type et receiver_expire_date sont requis pour un bénéficiaire DigitWace de type Business (voir doc §VI Create Beneficiary).');
+            if (empty($businessName) || empty($businessType)) {
+                throw new \InvalidArgumentException('receiver_business_name et receiver_business_type sont requis pour un bénéficiaire DigitWace de type Business (voir doc §VI Create Beneficiary).');
             }
             $payload['businessName'] = $businessName;
             $payload['businessType'] = $businessType;
-            $payload['expire_date'] = $expireDate;
         }
 
         $response = $this->digitwaceClient()->createBeneficiary($payload);
