@@ -789,6 +789,18 @@ class OutboundController extends Controller
                 'message' => "DigitWace ne propose pas de vérification préalable du compte ; il sera validé lors de l'envoi.",
             ]);
         }
+        // AJOUT (2026-08-20) : PawaPay (doc "Initiate remittance") ne documente
+        // aucun endpoint de vérification préalable de compte mobile money —
+        // même situation que DigitWace ci-dessus. Sans cette branche, l'étape 1
+        // de validation admin (TransactionController::update) tenterait à tort
+        // de vérifier le compte via Peex pour une transaction PawaPay.
+        if ($this->resolvePartner($request) === 'pawapay') {
+            return response()->json([
+                'status' => 200,
+                'valid' => null,
+                'message' => "PawaPay ne propose pas de vérification préalable du compte ; il sera validé lors de l'envoi.",
+            ]);
+        }
         if ($this->resolvePartner($request) === 'internal') {
             // AJOUT (2026-08-08) : transfert interne — aucun compte externe à
             // vérifier (le bénéficiaire retire en espèces avec un code + pièce
