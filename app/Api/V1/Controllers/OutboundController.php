@@ -164,6 +164,34 @@ class OutboundController extends Controller
     }
 
     /**
+     * Dérive le numéro LOCAL (sans indicatif pays) attendu par Peex/DigitWace
+     * à partir d'un numéro international (+237...).
+     *
+     * FIX (2026-08-20, incident Cameroun) : après avoir retiré l'indicatif
+     * (+237), il restait un '0' de tronc initial (convention de numérotation
+     * locale ouest/centre-africaine — ex: on compose "0987654332" en local,
+     * mais le numéro "réel" une fois combiné à l'indicatif est "+237987654332",
+     * 9 chiffres) que ce code ne retirait jamais. Peex rejetait alors
+     * systématiquement le numéro camerounais avec "Cameroon phone number must
+     * have 9 digits !" (10 chiffres envoyés au lieu de 9 — voir
+     * check_account_status, storage/logs/laravel : 19:33 UTC). Ce même motif
+     * (indicatif retiré, '0' de tronc jamais retiré) existait aussi dans
+     * sendDigitwaceWalletTransaction ci-dessous — probablement responsable des
+     * mêmes rejets côté DigitWace pour tout corridor utilisant cette
+     * convention, pas seulement le Cameroun.
+     */
+    private function toLocalPhoneNumber(?string $internationalPhone, ?string $dial): ?string
+    {
+        if (!$internationalPhone) {
+            return null;
+        }
+        $local = ($dial && strpos($internationalPhone, $dial) === 0)
+            ? substr($internationalPhone, strlen($dial))
+            : ltrim($internationalPhone, '+');
+        return preg_replace('/^0+/', '', $local);
+    }
+
+    /**
      * Uniform error handling for Peex calls: tries to decode Peex's
      * {error: {statusCode, name, message}} JSON body when available.
      */
@@ -936,10 +964,11 @@ class OutboundController extends Controller
         //    expliquer la 500 générique observée jusqu'ici, quel que soit le chemin (underscore/tiret).
         $countryCodeUpper = strtoupper($countryCode);
         $dial = PeexCorridors::list()[$countryCodeUpper]['dial'] ?? null;
-        $localAccountNumber = $phone_number;
-        if ($dial && strpos($localAccountNumber, $dial) === 0) {
-            $localAccountNumber = substr($localAccountNumber, strlen($dial));
-        }
+        // FIX (2026-08-20, incident Cameroun) : voir toLocalPhoneNumber() —
+        // il manquait le retrait du '0' de tronc initial, d'où le rejet
+        // Peex "Cameroon phone number must have 9 digits !" (10 chiffres
+        // envoyés au lieu de 9).
+        $localAccountNumber = $this->toLocalPhoneNumber($phone_number, $dial);
 
         $payload = [
             'countryCode' => $countryCodeUpper,
@@ -1391,7 +1420,9 @@ class OutboundController extends Controller
             $payer = $this->resolveDigitwacePayerCode($receivingCountry, $fromCurrency, $request->get('digitwace_service'), false);
 
             $dial = PeexCorridors::list()[strtoupper($receivingCountry)]['dial'] ?? null;
-            $localNumber = ($dial && strpos($phone, $dial) === 0) ? substr($phone, strlen($dial)) : ltrim($phone, '+');
+            // FIX (2026-08-20) : voir toLocalPhoneNumber() — même correctif que
+            // check_account_status ci-dessus (retrait du '0' de tronc initial).
+            $localNumber = $this->toLocalPhoneNumber($phone, $dial);
 
             $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
 
