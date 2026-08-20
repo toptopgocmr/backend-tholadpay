@@ -35,6 +35,22 @@ php artisan config:cache
 # via la table `migrations`).
 php artisan migrate --force
 
+# CORRECTIF (2026-08-20) : les images CNI/justificatifs (uploads/digipay/)
+# ne s'affichaient plus une fois le Volume Railway monte sur
+# /var/www/html/public/uploads. Diagnostic confirme via `stat` en prod :
+# ce dossier appartenait a root:root en mode 0755 alors qu'Apache/PHP
+# tourne en www-data (uid 33) -> www-data n'a AUCUN droit d'ecriture sur
+# un dossier root:root 0755 (pas dans le groupe, pas "other" en ecriture),
+# donc impossible de creer le sous-dossier digipay/ ni les fichiers dedans.
+# Le "chown -R www-data" fait dans le Dockerfile ne sert a rien ici : il
+# s'execute au BUILD, alors que Railway remonte le Volume par-dessus au
+# RUNTIME (a chaque demarrage de conteneur), et remet root:root a chaque
+# fois. On doit donc reappliquer les droits ICI, a chaque demarrage,
+# apres le montage du volume.
+mkdir -p /var/www/html/public/uploads/digipay
+chown -R www-data:www-data /var/www/html/public/uploads
+chmod -R 775 /var/www/html/public/uploads
+
 # Railway réactive parfois mpm_event/mpm_worker en plus de mpm_prefork déjà
 # actif dans l'image php:8.1-apache (mod_php exige prefork). Deux MPM actifs
 # en même temps font planter Apache au démarrage avec :
