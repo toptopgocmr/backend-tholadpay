@@ -2071,4 +2071,75 @@ class OutboundController extends Controller
         }
         return response()->json(['status' => 200, 'data' => $response['data'] ?? []]);
     }
+
+    /**
+     * AJOUT (2026-08-20, demande explicite "rapport de tests DigitWace") :
+     * endpoint de diagnostic TEMPORAIRE. Contrairement à get_digitwace_relations
+     * et consorts ci-dessus, celui-ci répond TOUJOURS en HTTP 200 (même en cas
+     * d'échec côté DigitWace) et renvoie le détail brut de l'erreur (code HTTP
+     * réel, message, URL appelée, corps de réponse tronqué) — utile pour
+     * inspecter une erreur 401/403/500 depuis un simple GET (navigateur/
+     * WebFetch), sans avoir besoin d'accéder aux logs Railway. Protégé par un
+     * secret partagé (DIGITWACE_DIAG_SECRET, à définir dans .env) pour ne pas
+     * laisser n'importe qui déclencher des appels DigitWace à volonté.
+     * À SUPPRIMER (cette méthode + la route associée) une fois le diagnostic
+     * terminé.
+     */
+    public function digitwace_diag(Request $request)
+    {
+        $secret = env('DIGITWACE_DIAG_SECRET');
+        if (!$secret || $request->get('secret') !== $secret) {
+            return response()->json(['status' => 404], 404);
+        }
+
+        $checks = [];
+        $run = function (string $name, callable $fn) use (&$checks) {
+            $start = microtime(true);
+            try {
+                $result = $fn();
+                $checks[] = [
+                    'name' => $name,
+                    'ok' => true,
+                    'duration_ms' => round((microtime(true) - $start) * 1000),
+                    'result' => $result,
+                ];
+            } catch (\GuzzleHttp\Exception\RequestException $e) {
+                $status = $e->hasResponse() ? $e->getResponse()->getStatusCode() : null;
+                $body = $e->hasResponse() ? mb_substr((string) $e->getResponse()->getBody(), 0, 1500) : null;
+                $checks[] = [
+                    'name' => $name,
+                    'ok' => false,
+                    'duration_ms' => round((microtime(true) - $start) * 1000),
+                    'http_status' => $status,
+                    'message' => $e->getMessage(),
+                    'request' => $e->getRequest() ? ($e->getRequest()->getMethod() . ' ' . (string) $e->getRequest()->getUri()) : null,
+                    'raw_body' => $body,
+                ];
+            } catch (\Exception $e) {
+                $checks[] = [
+                    'name' => $name,
+                    'ok' => false,
+                    'duration_ms' => round((microtime(true) - $start) * 1000),
+                    'message' => $e->getMessage(),
+                ];
+            }
+        };
+
+        $client = $this->digitwaceClient();
+        $run('login+relation (GET transaction/relation)', function () use ($client) { return $client->getRelation(); });
+        $run('origin_fund p2p (GET transaction/origin_fund/p2p)', function () use ($client) { return $client->getOriginFund('p2p'); });
+        $run('reason p2p (GET transaction/reason/p2p)', function () use ($client) { return $client->getReason('p2p'); });
+        $run('balance (GET account/balance)', function () use ($client) { return $client->getBalance(); });
+        $run('payout_service_code CI/XOF', function () use ($client) { return $client->getPayoutServiceCode('CI', 'XOF'); });
+
+        $email = (string) env('DIGITWACE_EMAIL');
+        $maskedEmail = $email ? (substr($email, 0, 4) . '***@' . (explode('@', $email)[1] ?? '')) : null;
+
+        return response()->json([
+            'status' => 200,
+            'digitwace_url' => env('DIGITWACE_URL'),
+            'digitwace_email_masked' => $maskedEmail,
+            'checks' => $checks,
+        ]);
+    }
 }
