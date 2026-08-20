@@ -20,6 +20,11 @@ class Transaction extends Model
         // add_receiver_digitwace_fields_to_transactions_table. Repris automatiquement
         // à l'étape de validation si le partenaire DigitWace est sélectionné.
         'receiver_id_number', 'receiver_id_type', 'receiver_relation',
+        // Date de naissance bénéficiaire (doc DigitWace §VI : "dob", exigée par
+        // certaines destinations même pour un compte Personnel) — voir migration
+        // add_receiver_dob_to_transactions_table. Absente d'ici jusqu'alors, toute
+        // valeur envoyée par le mobile était silencieusement perdue (mass-assignment).
+        'receiver_dob',
         // Transferts internes (voir migration add_internal_transfer_fields) : code de
         // retrait aléatoire généré à la validation si le partenaire est 'internal'.
         'internal_pickup_code',
