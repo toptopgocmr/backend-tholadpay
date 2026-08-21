@@ -495,6 +495,35 @@ class OutboundController extends Controller
     }
 
     /**
+     * FIX (2026-08-21, blocage envoi transaction #96) : résout une "ville
+     * expéditeur" pour WACEPAY (/sender/create, champ 'city') en l'absence de
+     * tout champ dédié en base (senders.postal_code contient un code postal
+     * ou, à défaut, le pays — jamais une ville, voir ensureDigitwaceSenderCode
+     * ci-dessous). Envoyer $sender->country (ex: "Congo") était rejeté par
+     * WACEPAY ("This city does not exist or is disabled"), un nom de pays
+     * n'étant jamais une ville valide.
+     *
+     * Solution provisoire : le réseau d'agents TholadPay/Send-Paz n'opère à ce
+     * jour que depuis Congo-Brazzaville, donc "Brazzaville" est un défaut
+     * fiable pour tous les senders actuels. Table à étendre (par ISO2) le jour
+     * où un agent basé dans un autre pays est enregistré ; au-delà de cette
+     * table, on retombe sur le nom du pays (comportement historique, pour ne
+     * pas régresser silencieusement sur un pays inconnu — DigitWace le
+     * rejettera explicitement le cas échéant, comme avant ce fix).
+     *
+     * À remplacer par un vrai champ "Ville expéditeur" (migration senders +
+     * formulaires mobile/admin) dès que cette hypothèse ne tient plus.
+     */
+    private function resolveSenderCity(Sender $sender): string
+    {
+        $iso2 = $this->countryNameToIso2($sender->country);
+        $defaultCityByCountry = [
+            'CG' => 'Brazzaville', // Congo-Brazzaville — seul pays d'opération connu à ce jour.
+        ];
+        return $defaultCityByCountry[$iso2] ?? ($sender->country ?: 'N/A');
+    }
+
+    /**
      * Récupère (ou crée si absent) le Code expéditeur DigitWace pour ce
      * Sender local, et le met en cache sur la ligne `senders.digitwace_code`
      * (voir migration 2026_08_08_090000) pour ne jamais recréer deux fois le
@@ -551,7 +580,18 @@ class OutboundController extends Controller
             // en ISO2. On le résout désormais via PeexCorridors::list() (déjà la
             // source de vérité nom<->ISO2 utilisée ailleurs dans ce contrôleur).
             'country' => $this->countryNameToIso2($sender->country),
-            'city' => $sender->country, // Pas de champ "ville expéditeur" dédié en base — voir Note ci-dessous.
+            // FIX (2026-08-21, blocage envoi transaction #96 vers la Chine) : 'city'
+            // envoyait jusqu'ici le NOM DU PAYS ($sender->country, ex. "Congo") faute
+            // de champ "ville expéditeur" dédié en base (voir commentaire historique
+            // ci-dessus, même lacune que pour PawaPay, sendPawapayRemittance). WACEPAY
+            // rejette ça avec la même erreur d'enum que idType ("This city does not
+            // exist or is disabled. Please contact support") — un nom de pays n'est
+            // jamais une ville valide. Le réseau d'agents TholadPay/Send-Paz opère à
+            // ce jour uniquement depuis Congo-Brazzaville : on utilise donc
+            // "Brazzaville" par défaut. À remplacer par un vrai champ ville
+            // expéditeur (mobile + admin + migration senders) dès qu'un agent basé
+            // ailleurs qu'à Brazzaville est enregistré — voir resolveSenderCity().
+            'city' => $this->resolveSenderCity($sender),
             'gender' => $gender,
             'civility' => 'Single', // Pas de champ "situation matrimoniale" en base ; valeur par défaut acceptée par DigitWace.
             'idNumber' => $sender->cni_number,
@@ -1918,7 +1958,11 @@ class OutboundController extends Controller
                         // on retombe sur le code postal ou, à défaut, le pays.
                         'addressLine' => $sender->postal_code ?: ($sender->country ?: 'N/A'),
                         'postalCode' => $sender->postal_code ?: 'N/A',
-                        'city' => $sender->country ?: 'N/A',
+                        // FIX (2026-08-21) : même bug que DigitWace/ensureDigitwaceSenderCode
+                        // ci-dessus (nom de pays envoyé comme ville) — corrigé par cohérence
+                        // via le même helper, même si le sandbox PawaPay n'est pas encore
+                        // testé à ce jour (voir note en tête de classe).
+                        'city' => $this->resolveSenderCity($sender),
                         'country' => PawapayCorridors::iso3($sender->country) ?: (string) $sender->country,
                     ],
                     'identification' => [
