@@ -510,8 +510,15 @@ class OutboundController extends Controller
         // Heuristiques de correspondance entre les champs locaux (issus de
         // l'ancienne intégration TerraPay/Peex, plus permissifs) et le schéma
         // DigitWace, strict sur idType/civility (doc §V).
+        // FIX (2026-08-21, incidents #81/#82/#92/#93) : WACEPAY confirme (retour
+        // support digitwace, 2026-08-21) que 'CNI' n'existe PAS dans la liste des
+        // idType supportés — d'où l'erreur 3003 "This Id type does not exist or is
+        // disabled" sur /sender/create pour tout sender non-passeport. Le code
+        // WACEPAY correct pour une carte d'identité nationale est 'CI' (IDENTITY
+        // CARD). Liste complète confirmée : PP, CI, RCCM, AG, TAX, CPF, CNPJ, FID,
+        // CC, CR, SSP, LI, CNIC, BI, CID, GCCID.
         $idTypeRaw = strtolower((string) ($sender->type_id ?? ''));
-        $idType = (strpos($idTypeRaw, 'pass') !== false) ? 'PP' : 'CNI';
+        $idType = (strpos($idTypeRaw, 'pass') !== false) ? 'PP' : 'CI';
         $gender = strtoupper((string) ($sender->sex ?? 'M')) === 'F' ? 'F' : 'M';
 
         // AJOUT (2026-08-13, demande explicite) : support des senders Business
@@ -637,8 +644,12 @@ class OutboundController extends Controller
         // disabled." On normalise donc désormais vers PP/CNI uniquement (même
         // logique que ensureDigitwaceSenderCode() ci-dessus pour l'expéditeur) au
         // lieu de transmettre la valeur brute du formulaire.
+        // FIX (2026-08-21, incidents #81/#82/#92/#93) : idem ensureDigitwaceSenderCode()
+        // ci-dessus — 'CNI' n'est pas un idType WACEPAY valide, le code correct pour
+        // une carte d'identité est 'CI' (confirmé par le support digitwace le
+        // 2026-08-21).
         $idTypeRaw = strtoupper((string) $request->get('receiver_id_type'));
-        $idType = ($idTypeRaw === '' || $idTypeRaw === 'PP') ? 'PP' : 'CNI';
+        $idType = ($idTypeRaw === '' || $idTypeRaw === 'PP') ? 'PP' : 'CI';
 
         $payload = [
             'type' => $isBusiness ? 'B' : 'P',
