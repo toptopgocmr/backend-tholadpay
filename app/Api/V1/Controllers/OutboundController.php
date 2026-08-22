@@ -719,6 +719,33 @@ class OutboundController extends Controller
         $idTypeRaw = strtoupper((string) $request->get('receiver_id_type'));
         $idType = ($idTypeRaw === '' || $idTypeRaw === 'PP') ? 'PP' : 'CI';
 
+        // FIX (2026-08-22, blocage transaction #100 vers la France) : même bug
+        // que celui déjà corrigé côté sender (voir resolveSenderCity() et
+        // ensureDigitwaceSenderCode() ci-dessus), mais côté bénéficiaire cette
+        // fois. Deux champs distincts en souffraient :
+        //
+        //  - 'city' : pour un virement bancaire, le mobile envoie
+        //    systématiquement receiver_city = '' (voir transaction.page.ts —
+        //    ce champ n'est renseigné que pour le Cash Pickup, "ville de
+        //    retrait"). Le repli tombait donc sur $receiving_country, un nom
+        //    de pays ("France") — jamais une ville valide pour WACEPAY, qui
+        //    valide 'city' contre une liste fermée (confirmé par leur support
+        //    le 22/08/2026, même mécanisme que idType). D'où l'erreur "This
+        //    city does not exist or is disabled" sur /beneficiary/create.
+        //    WACEPAY nous a explicitement indiqué d'utiliser "Any City" pour
+        //    toute ville non couverte par une correspondance confirmée (nous
+        //    n'avons aucune ville bénéficiaire confirmée à ce jour, contrairement
+        //    à "Brazzaville" côté sender) — voir resolveSenderCity() pour le
+        //    même raisonnement.
+        //  - 'country' : envoyait le nom de pays brut ("France") au lieu d'un
+        //    code ISO2, alors que DigitWace l'exige au format ISO2 pour
+        //    /sender/create ("The country must not be greater than 2
+        //    characters.", voir ensureDigitwaceSenderCode() ci-dessus) — même
+        //    contrainte documentée pour /beneficiary/create. Non détecté avant
+        //    ce jour car l'erreur 'city' était systématiquement renvoyée en
+        //    premier par WACEPAY, masquant ce second problème. On réutilise
+        //    countryNameToIso2() (déjà la source de vérité nom<->ISO2 dans ce
+        //    contrôleur) au lieu de dupliquer une conversion.
         $payload = [
             'type' => $isBusiness ? 'B' : 'P',
             'firstName' => $request->get('receiver_first_name'),
@@ -726,8 +753,8 @@ class OutboundController extends Controller
             'address' => $request->get('receiver_address') ?: $request->get('receiving_country'),
             'phone' => $this->toInternationalPhone($request->get('receiver_phone')),
             'mobile' => $this->toInternationalPhone($request->get('receiver_phone')),
-            'country' => $request->get('receiving_country'),
-            'city' => $request->get('receiver_city') ?: $request->get('receiving_country'),
+            'country' => $this->countryNameToIso2($request->get('receiving_country')),
+            'city' => $request->get('receiver_city') ?: 'Any City',
             'email' => $request->get('receiver_email'),
             'idNumber' => $idNumber,
             'idType' => $isBusiness ? 'RCCM' : $idType,
