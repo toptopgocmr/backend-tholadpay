@@ -190,25 +190,44 @@ class DigitwaceClient
      * meme "Sample URL request" que la section Bank juste au-dessus
      * (POST /transaction/bank/create), ce qui ne peut pas etre le vrai chemin
      * de cet endpoint (meme URL que la creation de transaction bancaire, avec
-     * un payload totalement different). On tente donc le chemin le plus
-     * probable au vu du nom de la ressource et des autres endpoints "liste"
-     * du meme document (POST /transaction/payout_service_code), avec repli
-     * automatique sur une variante camelCase si DigitWace renvoie 404 —
-     * meme strategie que OutboundController::check_account_status pour Peex.
+     * un payload totalement different).
+     *
+     * FIX (2026-08-22, test reel transaction #100 en sandbox) : la premiere
+     * hypothese (POST /transaction/payout_service_code) echoue desormais avec
+     * un 405 Method Not Allowed, PAS un 404 comme prevu par le repli existant
+     * ci-dessous — un 405 signifie generalement que le CHEMIN existe mais que
+     * le VERBE HTTP est faux, pas que le chemin est introuvable. Or tous les
+     * autres endpoints "liste de reference" de ce meme client (getRelation,
+     * getOriginFund, getReason, getBalance ci-dessous) sont en GET, jamais en
+     * POST — PayoutServiceCode est conceptuellement la meme famille
+     * d'endpoint (une liste de reference, pas une creation de ressource). On
+     * tente donc desormais GET en premier (avec les parametres en query
+     * string plutot qu'en corps JSON), PUIS POST en repli, sur les deux
+     * variantes de chemin (snake_case/camelCase) — et on retente sur 404 OU
+     * 405 (pas seulement 404 comme avant), meme strategie de repli en cascade
+     * que OutboundController::check_account_status pour Peex.
      */
     public function getPayoutServiceCode(string $payoutCountry, string $payoutCurrency): array
     {
-        $payload = ['payoutCountry' => $payoutCountry, 'payoutCurrency' => $payoutCurrency];
-        $paths = ['transaction/payout_service_code', 'transaction/payoutServiceCode'];
+        $params = ['payoutCountry' => $payoutCountry, 'payoutCurrency' => $payoutCurrency];
+        $attempts = [
+            ['GET', 'transaction/payout_service_code'],
+            ['GET', 'transaction/payoutServiceCode'],
+            ['POST', 'transaction/payout_service_code'],
+            ['POST', 'transaction/payoutServiceCode'],
+        ];
         $lastException = null;
 
-        foreach ($paths as $i => $path) {
+        foreach ($attempts as $i => $attempt) {
+            [$method, $path] = $attempt;
             try {
-                return $this->request('POST', $path, $payload);
+                return $method === 'GET'
+                    ? $this->request('GET', $path, [], $params)
+                    : $this->request('POST', $path, $params);
             } catch (RequestException $e) {
                 $lastException = $e;
                 $status = $e->hasResponse() ? $e->getResponse()->getStatusCode() : null;
-                if ($status === 404 && $i < count($paths) - 1) {
+                if (in_array($status, [404, 405], true) && $i < count($attempts) - 1) {
                     continue;
                 }
                 throw $e;
