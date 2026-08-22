@@ -490,7 +490,28 @@ class OutboundController extends Controller
                 return $iso2;
             }
         }
-        Log::warning("[DigitWace] Pays '$countryName' absent de PeexCorridors::list() — ISO2 approximé par troncature, à vérifier si DigitWace le rejette.");
+        // FIX (2026-08-22, vérification préventive USA/Chine après l'incident
+        // 'city'/'country' bénéficiaire de la transaction #100) : PeexCorridors
+        // ne couvre QUE les corridors mobile money Afrique de l'Ouest/Centrale
+        // (voir sa doc de classe) — "France", "China", "United States" n'y
+        // figurent jamais, donc CHAQUE pays hors mobile money africain tombait
+        // systématiquement sur le repli par troncature ci-dessous. Ce repli est
+        // correct par coïncidence pour "France" (FR) mais SILENCIEUSEMENT FAUX
+        // pour "China" (tronqué en "CH" = Suisse, pas "CN") ou par exemple
+        // "United States" (tronqué en "UN", pas "US") — un risque de rejet
+        // WACEPAY (ou pire, un envoi accepté vers le mauvais pays côté
+        // référentiel) qu'on ne peut pas se permettre de découvrir en
+        // production comme pour 'city'. Avant de tronquer, on interroge donc la
+        // table `countries` (déjà la source de vérité utilisée par le
+        // sélecteur de pays mobile, voir country.page.ts qui expose son
+        // iso_3166_2 comme "country_code" côté app) par correspondance de nom.
+        $iso2 = \App\Country::query()
+            ->whereRaw('LOWER(name) = ?', [strtolower($countryName)])
+            ->value('iso_3166_2');
+        if ($iso2) {
+            return strtoupper($iso2);
+        }
+        Log::warning("[DigitWace] Pays '$countryName' absent de PeexCorridors::list() ET de la table countries — ISO2 approximé par troncature, à vérifier si DigitWace le rejette.");
         return strtoupper(substr($countryName, 0, 2));
     }
 
@@ -823,6 +844,24 @@ class OutboundController extends Controller
      */
     private function resolveDigitwacePayerCode(string $country, string $currency, ?string $serviceHint, bool $forBank): array
     {
+        // FIX (2026-08-22, vérification préventive USA/Côte d'Ivoire/Chine après
+        // l'incident 'city' bénéficiaire de la transaction #100) : $country
+        // arrive ici tel quel depuis $request->get('receiving_country'), qui
+        // est le NOM COMPLET du pays ("France", "Côte d'Ivoire", "China" —
+        // voir transaction.page.ts::goto(), shareService.country), jamais un
+        // code ISO2. Or getBankList() ci-dessous (App\Libraries\DigitwaceClient)
+        // déclare explicitement son paramètre pays comme "string $iso2", et le
+        // script de diagnostic check_digitwace_config() plus bas dans ce
+        // contrôleur teste getPayoutServiceCode() avec 'CI' (ISO2), jamais un
+        // nom de pays complet — signe que ces deux endpoints DigitWace
+        // attendent un ISO2, comme /sender/create et /beneficiary/create déjà
+        // corrigés (voir ensureDigitwaceSenderCode/createDigitwaceBeneficiary
+        // ci-dessus, même contrainte documentée : "The country must not be
+        // greater than 2 characters."). On convertit donc systématiquement ici
+        // via countryNameToIso2() (idempotent : un ISO2 déjà reçu ressort
+        // inchangé), plutôt que d'attendre qu'un pays précis échoue en
+        // production comme 'city' vient de le faire pour la France.
+        $country = $this->countryNameToIso2($country);
         $client = $this->digitwaceClient();
         $service = $serviceHint;
 
@@ -1583,7 +1622,13 @@ class OutboundController extends Controller
                 'beneficiaryCode' => $beneficiary['code'],
                 'fromCurrency' => $fromCurrency,
                 'mobileReceiveNumber' => $localNumber,
-                'fromCountry' => $sender->country,
+                // FIX (2026-08-22) : idem conversion déjà appliquée à 'country'/
+                // 'nationality' dans ensureDigitwaceSenderCode() ci-dessus —
+                // $sender->country est stocké en clair ("Congo"), jamais en ISO2,
+                // alors que DigitWace l'exige ("The country must not be greater
+                // than 2 characters."). Cohérence sur tous les endpoints DigitWace
+                // qui prennent un 'fromCountry'.
+                'fromCountry' => $this->countryNameToIso2($sender->country),
                 'originFund' => $refFields['originFund'],
                 'reason' => $refFields['reason'],
                 'relation' => $refFields['relation'],
@@ -1635,7 +1680,11 @@ class OutboundController extends Controller
 
             $bankId = $request->get('bank_id');
             if (!$bankId && $bankName) {
-                $banks = $this->digitwaceClient()->getBankList($receivingCountry, $payer['payerCode'])['data'] ?? [];
+                // FIX (2026-08-22) : voir commentaire de resolveDigitwacePayerCode()
+                // ci-dessus — getBankList() attend un ISO2 ('$iso2' dans sa
+                // signature, DigitwaceClient::getBankList), pas $receivingCountry
+                // brut ("France"/"United States"/"China").
+                $banks = $this->digitwaceClient()->getBankList($this->countryNameToIso2($receivingCountry), $payer['payerCode'])['data'] ?? [];
                 foreach ($banks as $bank) {
                     if (stripos($bank['BankName'] ?? '', $bankName) !== false) {
                         $bankId = $bank['BankID'];
@@ -1663,7 +1712,13 @@ class OutboundController extends Controller
                 'bankId' => (int) $bankId,
                 'bankSwCode' => $bankSwift ?: 'N/A',
                 'bankBranch' => $request->get('bank_branch') ?: '',
-                'fromCountry' => $sender->country,
+                // FIX (2026-08-22) : idem conversion déjà appliquée à 'country'/
+                // 'nationality' dans ensureDigitwaceSenderCode() ci-dessus —
+                // $sender->country est stocké en clair ("Congo"), jamais en ISO2,
+                // alors que DigitWace l'exige ("The country must not be greater
+                // than 2 characters."). Cohérence sur tous les endpoints DigitWace
+                // qui prennent un 'fromCountry'.
+                'fromCountry' => $this->countryNameToIso2($sender->country),
                 'comment' => $trackId,
                 'originFund' => $refFields['originFund'],
                 'reason' => $refFields['reason'],
@@ -1792,7 +1847,13 @@ class OutboundController extends Controller
                 'beneficiaryCode' => $beneficiary['code'],
                 'fromCurrency' => $fromCurrency,
                 'mobileTopup' => $phone,
-                'fromCountry' => $sender->country,
+                // FIX (2026-08-22) : idem conversion déjà appliquée à 'country'/
+                // 'nationality' dans ensureDigitwaceSenderCode() ci-dessus —
+                // $sender->country est stocké en clair ("Congo"), jamais en ISO2,
+                // alors que DigitWace l'exige ("The country must not be greater
+                // than 2 characters."). Cohérence sur tous les endpoints DigitWace
+                // qui prennent un 'fromCountry'.
+                'fromCountry' => $this->countryNameToIso2($sender->country),
                 'originFund' => $refFields['originFund'],
                 'reason' => $refFields['reason'],
                 'question' => $question,
@@ -2328,7 +2389,9 @@ class OutboundController extends Controller
             if (!$payerCode) {
                 $payerCode = $this->resolveDigitwacePayerCode($country, $currency, null, true)['payerCode'];
             }
-            $response = $this->digitwaceClient()->getBankList($country, $payerCode);
+            // FIX (2026-08-22) : voir resolveDigitwacePayerCode() — getBankList()
+            // attend un ISO2, conversion idempotente si $country était déjà un ISO2.
+            $response = $this->digitwaceClient()->getBankList($this->countryNameToIso2($country), $payerCode);
         } catch (\GuzzleHttp\Exception\RequestException $e) {
             return $this->digitwaceErrorResponse($e, 'get_digitwace_bank_list');
         } catch (\Exception $e) {
