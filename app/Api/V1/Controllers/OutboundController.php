@@ -506,21 +506,49 @@ class OutboundController extends Controller
      * Solution provisoire : le réseau d'agents TholadPay/Send-Paz n'opère à ce
      * jour que depuis Congo-Brazzaville, donc "Brazzaville" est un défaut
      * fiable pour tous les senders actuels. Table à étendre (par ISO2) le jour
-     * où un agent basé dans un autre pays est enregistré ; au-delà de cette
-     * table, on retombe sur le nom du pays (comportement historique, pour ne
-     * pas régresser silencieusement sur un pays inconnu — DigitWace le
-     * rejettera explicitement le cas échéant, comme avant ce fix).
+     * où un agent basé dans un autre pays est enregistré.
+     *
+     * CONFIRMÉ PAR WACEPAY (support digitwace, 2026-08-22), en réponse à nos
+     * questions sur ce champ :
+     *   1. 'city' valide contre une liste FERMÉE de villes déjà enregistrées
+     *      dans leur système (même mécanisme que 'idType') ; si la ville n'y
+     *      figure pas, la valeur à envoyer est littéralement "Any City".
+     *   2. "Brazzaville" est confirmée présente dans cette liste — le défaut
+     *      CG => 'Brazzaville' ci-dessous n'est donc plus une hypothèse.
+     *   3. Il n'existe aucun endpoint pour récupérer la liste des villes
+     *      valides par pays (contrairement à PayoutServiceCode ou à la liste
+     *      des banques) — impossible de valider ce champ côté client avant
+     *      l'envoi ; WACEPAY nous renvoie explicitement vers "Any City" pour
+     *      tout pays/ville non couvert par une correspondance déjà confirmée.
+     *
+     * FIX (2026-08-22) : pour tout pays hors de la table ci-dessous, on
+     * envoyait auparavant $sender->country brut (ex. "France"), qui aurait
+     * échoué avec la même erreur 3003 que le bug initial — un nom de pays
+     * n'étant jamais une ville valide. On utilise désormais "Any City" par
+     * défaut (valeur que WACEPAY reconnaît explicitement), au lieu de
+     * réintroduire silencieusement le même bug pour un pays non mappé.
      *
      * À remplacer par un vrai champ "Ville expéditeur" (migration senders +
-     * formulaires mobile/admin) dès que cette hypothèse ne tient plus.
+     * formulaires mobile/admin) le jour où plusieurs villes confirmées par
+     * WACEPAY doivent être distinguées (ex: agents dans plusieurs villes du
+     * Congo) — voir aussi le champ "ville"/town_id déjà saisi côté mobile
+     * (customermodify.page.ts, transaction.page.ts) pour l'adresse locale du
+     * sender : il n'est PAS utilisé ici intentionnellement, faute de moyen de
+     * vérifier au préalable si cette ville précise est enregistrée chez
+     * WACEPAY (voir point 3 ci-dessus) — l'utiliser tel quel risquerait de
+     * réintroduire l'erreur 3003 pour toute ville congolaise autre que
+     * Brazzaville.
      */
     private function resolveSenderCity(Sender $sender): string
     {
         $iso2 = $this->countryNameToIso2($sender->country);
         $defaultCityByCountry = [
-            'CG' => 'Brazzaville', // Congo-Brazzaville — seul pays d'opération connu à ce jour.
+            'CG' => 'Brazzaville', // Congo-Brazzaville — confirmé valide par WACEPAY le 22/08/2026.
         ];
-        return $defaultCityByCountry[$iso2] ?? ($sender->country ?: 'N/A');
+        // Fallback "Any City" confirmé par WACEPAY (22/08/2026) pour tout pays
+        // non couvert par la table ci-dessus, au lieu du nom de pays brut
+        // (systématiquement rejeté par leur validation de 'city').
+        return $defaultCityByCountry[$iso2] ?? 'Any City';
     }
 
     /**
