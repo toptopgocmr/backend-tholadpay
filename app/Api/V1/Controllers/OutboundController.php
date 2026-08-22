@@ -2500,7 +2500,38 @@ class OutboundController extends Controller
         $run('origin_fund p2p (GET transaction/origin_fund/p2p)', function () use ($client) { return $client->getOriginFund('p2p'); });
         $run('reason p2p (GET transaction/reason/p2p)', function () use ($client) { return $client->getReason('p2p'); });
         $run('balance (GET account/balance)', function () use ($client) { return $client->getBalance(); });
-        $run('payout_service_code CI/XOF', function () use ($client) { return $client->getPayoutServiceCode('CI', 'XOF'); });
+        $run('payout_service_code CI/XOF (cascade actuel — throw sur le dernier échec)', function () use ($client) { return $client->getPayoutServiceCode('CI', 'XOF'); });
+
+        // AJOUT (2026-08-22, demande explicite "teste sur Postman") : ce
+        // conteneur cloud n'a PAS d'accès réseau sortant vers sandbox.wacepay.com
+        // (bloqué par l'allowlist), et le pont vers l'ordinateur de l'utilisateur
+        // non plus (device_bash, même contrainte — déjà rencontrée sur `git push`).
+        // Seul le serveur Railway déployé peut réellement joindre WACEPAY. On
+        // utilise donc CET endpoint de diagnostic, déjà en production, comme
+        // "Postman à distance" : chaque combinaison méthode/chemin/format de
+        // paramètres est testée INDIVIDUELLEMENT et en brut (contrairement à
+        // getPayoutServiceCode() ci-dessus, qui s'arrête au premier succès et ne
+        // remonte que la DERNIÈRE erreur de sa cascade) pour voir le détail exact
+        // (code HTTP, corps de réponse) de CHAQUE tentative en un seul
+        // déploiement, plutôt que d'itérer un correctif à la fois (cycle
+        // push/redéploiement trop lent pour deviner à l'aveugle).
+        $probe = function (string $label, string $method, string $path, array $params) use ($client, $run) {
+            $run("payout_service_code PROBE: $label", function () use ($client, $method, $path, $params) {
+                return $method === 'GET'
+                    ? $client->request('GET', $path, [], $params)
+                    : $client->request('POST', $path, $params);
+            });
+        };
+        $probe('GET snake_case, query params payoutCountry/payoutCurrency', 'GET', 'transaction/payout_service_code', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
+        $probe('GET camelCase, query params payoutCountry/payoutCurrency', 'GET', 'transaction/payoutServiceCode', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
+        $probe('POST snake_case, json payoutCountry/payoutCurrency', 'POST', 'transaction/payout_service_code', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
+        $probe('POST camelCase, json payoutCountry/payoutCurrency', 'POST', 'transaction/payoutServiceCode', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
+        $probe('GET snake_case, path segments /CI/XOF (style origin_fund/{type})', 'GET', 'transaction/payout_service_code/CI/XOF', []);
+        $probe('GET camelCase, path segments /CI/XOF', 'GET', 'transaction/payoutServiceCode/CI/XOF', []);
+        $probe('POST kebab-case, json payoutCountry/payoutCurrency', 'POST', 'transaction/payout-service-code', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
+        $probe('GET kebab-case, query params', 'GET', 'transaction/payout-service-code', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
+        $probe('POST snake_case, json country/currency (noms de champs alternatifs)', 'POST', 'transaction/payout_service_code', ['country' => 'CI', 'currency' => 'XOF']);
+        $probe('GET snake_case, query params country/currency (noms de champs alternatifs)', 'GET', 'transaction/payout_service_code', ['country' => 'CI', 'currency' => 'XOF']);
 
         $email = (string) env('DIGITWACE_EMAIL');
         $maskedEmail = $email ? (substr($email, 0, 4) . '***@' . (explode('@', $email)[1] ?? '')) : null;
