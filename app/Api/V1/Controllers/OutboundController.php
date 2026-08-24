@@ -1741,6 +1741,18 @@ class OutboundController extends Controller
                 'payerCode' => $payer['payerCode'],
                 'amountToPaid' => floatval($request->get('amount')),
                 'senderCode' => $senderCode,
+                // FIX (2026-08-24) : confirmé par un test réel en production
+                // (Côte d'Ivoire/XOF, virement Mobile vers Djigui Djigui,
+                // transaction #105, voir logs Railway 16:06:18) — WACEPAY
+                // /transaction/wallet/create rejette la requête en 422
+                // ("Error validation data — sender_code_transaction: The
+                // sender code transaction field must be present.") si CE
+                // champ (en plus de 'senderCode' déjà envoyé et documenté)
+                // est absent. Même constat que le fix déjà appliqué à
+                // sendDigitwaceBankTransaction/createBankTransaction : champ
+                // totalement absent de la doc v2.0.0, mais bien exigé aussi
+                // par l'endpoint wallet.
+                'sender_code_transaction' => $senderCode,
                 'beneficiaryCode' => $beneficiary['code'],
                 'fromCurrency' => $fromCurrency,
                 'mobileReceiveNumber' => $localNumber,
