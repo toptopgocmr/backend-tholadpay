@@ -1725,6 +1725,19 @@ class OutboundController extends Controller
                 'payerCode' => $payer['payerCode'],
                 'amountToPaid' => floatval($request->get('amount')),
                 'senderCode' => $senderCode,
+                // FIX (2026-08-24) : confirmé par un test réel en production
+                // (virement France/EUR, Pierre Eyidi Priso, transaction #101,
+                // voir logs Railway 13:01:23) — WACEPAY /transaction/bank/create
+                // rejette la requête en 422 "Error validation data" /
+                // "sender_code_transaction: The sender code transaction field
+                // must be present." si CE champ (en plus de 'senderCode', qui
+                // reste documenté §X et toujours envoyé ci-dessus) est absent.
+                // Champ totalement absent de la doc v2.0.0 (§X Bank) dans ses
+                // deux versions (originale et republiée) — encore un écart
+                // doc/API comme celui de PayoutServiceCode. On envoie donc la
+                // même valeur sous les deux clés en attendant confirmation
+                // WACEPAY sur la différence réelle entre les deux.
+                'sender_code_transaction' => $senderCode,
                 'fromCurrency' => $fromCurrency,
                 'beneficiaryCode' => $beneficiary['code'],
                 'bankAccount' => $bankIban,
