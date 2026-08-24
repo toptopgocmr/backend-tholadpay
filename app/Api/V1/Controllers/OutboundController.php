@@ -1701,6 +1701,26 @@ class OutboundController extends Controller
 
             $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
 
+            // AJOUT (2026-08-24) : ni doc §X Bank ni le payload createBankTransaction
+            // n'ont de champ dédié pour la "banque correspondante" (ex. BIC
+            // CHASDEFX pour un virement EUR vers Revolut Bank UAB) ou pour
+            // l'adresse de l'agence bénéficiaire — cas rencontré sur le test réel
+            // France/EUR (Pierre Eyidi Priso) préparé le 2026-08-24. En l'absence
+            // de confirmation WACEPAY sur le champ à utiliser, on les regroupe en
+            // best-effort dans 'bankBranch' (même logique que digitwace_callback
+            // plus bas dans ce fichier : best-effort documenté en attendant le
+            // vrai schéma). Un 'bank_branch' explicite dans la requête reste
+            // toujours prioritaire.
+            $bankBranch = $request->get('bank_branch');
+            if (!$bankBranch) {
+                $correspondentBic = $request->get('correspondent_bank_bic');
+                $bankAddress = $request->get('bank_address');
+                $bankBranch = trim(implode(' - ', array_filter([
+                    $bankAddress,
+                    $correspondentBic ? "Correspondent BIC: $correspondentBic" : null,
+                ])));
+            }
+
             $response = $this->digitwaceClient()->createBankTransaction([
                 'payerCode' => $payer['payerCode'],
                 'amountToPaid' => floatval($request->get('amount')),
@@ -1711,7 +1731,7 @@ class OutboundController extends Controller
                 'bankName' => $bankName ?: 'N/A',
                 'bankId' => (int) $bankId,
                 'bankSwCode' => $bankSwift ?: 'N/A',
-                'bankBranch' => $request->get('bank_branch') ?: '',
+                'bankBranch' => $bankBranch,
                 // FIX (2026-08-22) : idem conversion déjà appliquée à 'country'/
                 // 'nationality' dans ensureDigitwaceSenderCode() ci-dessus —
                 // $sender->country est stocké en clair ("Congo"), jamais en ISO2,
@@ -2424,126 +2444,15 @@ class OutboundController extends Controller
     }
 
     /**
-     * AJOUT (2026-08-20, demande explicite "rapport de tests DigitWace") :
-     * endpoint de diagnostic TEMPORAIRE. Contrairement à get_digitwace_relations
-     * et consorts ci-dessus, celui-ci répond TOUJOURS en HTTP 200 (même en cas
-     * d'échec côté DigitWace) et renvoie le détail brut de l'erreur (code HTTP
-     * réel, message, URL appelée, corps de réponse tronqué) — utile pour
-     * inspecter une erreur 401/403/500 depuis un simple GET (navigateur/
-     * WebFetch), sans avoir besoin d'accéder aux logs Railway. Protégé par un
-     * secret partagé (DIGITWACE_DIAG_SECRET, à définir dans .env) pour ne pas
-     * laisser n'importe qui déclencher des appels DigitWace à volonté.
-     * À SUPPRIMER (cette méthode + la route associée) une fois le diagnostic
-     * terminé.
+     * RETIRÉ (2026-08-24) : cette classe contenait ici un endpoint de
+     * diagnostic temporaire `digitwace_diag()` (ajouté le 2026-08-20, marqué
+     * "À SUPPRIMER une fois le diagnostic terminé" dans son propre
+     * commentaire), utilisé pour identifier depuis Railway — seul serveur
+     * avec une IP whitelistée côté WACEPAY — le vrai chemin de l'endpoint
+     * PayoutServiceCode. Celui-ci est désormais confirmé (POST
+     * /transaction/payouts/services, voir DigitwaceClient::
+     * getPayoutServiceCode) et vérifié par un test réel en sandbox le
+     * 2026-08-24 ; l'endpoint de diagnostic et sa route ('digitwace/diag',
+     * voir routes/api.php) ont donc été retirés.
      */
-    public function digitwace_diag(Request $request)
-    {
-        $secret = env('DIGITWACE_DIAG_SECRET');
-        if (!$secret || $request->get('secret') !== $secret) {
-            return response()->json(['status' => 404], 404);
-        }
-
-        $checks = [];
-        $run = function (string $name, callable $fn) use (&$checks) {
-            $start = microtime(true);
-            try {
-                $result = $fn();
-                $checks[] = [
-                    'name' => $name,
-                    'ok' => true,
-                    'duration_ms' => round((microtime(true) - $start) * 1000),
-                    'result' => $result,
-                ];
-            } catch (\GuzzleHttp\Exception\RequestException $e) {
-                $status = $e->hasResponse() ? $e->getResponse()->getStatusCode() : null;
-                $body = $e->hasResponse() ? mb_substr((string) $e->getResponse()->getBody(), 0, 1500) : null;
-                $checks[] = [
-                    'name' => $name,
-                    'ok' => false,
-                    'duration_ms' => round((microtime(true) - $start) * 1000),
-                    'http_status' => $status,
-                    'message' => $e->getMessage(),
-                    'request' => $e->getRequest() ? ($e->getRequest()->getMethod() . ' ' . (string) $e->getRequest()->getUri()) : null,
-                    'raw_body' => $body,
-                ];
-            } catch (\Exception $e) {
-                $checks[] = [
-                    'name' => $name,
-                    'ok' => false,
-                    'duration_ms' => round((microtime(true) - $start) * 1000),
-                    'message' => $e->getMessage(),
-                ];
-            }
-        };
-
-        // AJOUT (2026-08-20) : le support WACEPAY a confirmé par email que
-        // l'accès sandbox nécessite un whitelisting d'IP ("elles pourront nous
-        // transmettre leur adresse IP pour whitelist dans la sandbox") — on
-        // détecte donc ici l'IP sortante RÉELLE du serveur (via un service
-        // tiers, pas une valeur devinée), pour pouvoir la transmettre
-        // directement à WACEPAY. ATTENTION : sur Railway, cette IP n'est
-        // stable dans le temps QUE si "Static Outbound IPs" est activé (plan
-        // Pro, Settings -> Networking) ; sans ça, elle peut changer à chaque
-        // redéploiement et casser à nouveau l'accès après un whitelist ponctuel.
-        $outboundIp = null;
-        $ipCheckError = null;
-        try {
-            $ipResp = (new \GuzzleHttp\Client(['timeout' => 5]))->get('https://api.ipify.org?format=json');
-            $ipData = json_decode((string) $ipResp->getBody(), true);
-            $outboundIp = $ipData['ip'] ?? null;
-        } catch (\Exception $e) {
-            $ipCheckError = $e->getMessage();
-        }
-
-        $client = $this->digitwaceClient();
-        $run('login+relation (GET transaction/relation)', function () use ($client) { return $client->getRelation(); });
-        $run('origin_fund p2p (GET transaction/origin_fund/p2p)', function () use ($client) { return $client->getOriginFund('p2p'); });
-        $run('reason p2p (GET transaction/reason/p2p)', function () use ($client) { return $client->getReason('p2p'); });
-        $run('balance (GET account/balance)', function () use ($client) { return $client->getBalance(); });
-        $run('payout_service_code CI/XOF (cascade actuel — throw sur le dernier échec)', function () use ($client) { return $client->getPayoutServiceCode('CI', 'XOF'); });
-
-        // AJOUT (2026-08-22, demande explicite "teste sur Postman") : ce
-        // conteneur cloud n'a PAS d'accès réseau sortant vers sandbox.wacepay.com
-        // (bloqué par l'allowlist), et le pont vers l'ordinateur de l'utilisateur
-        // non plus (device_bash, même contrainte — déjà rencontrée sur `git push`).
-        // Seul le serveur Railway déployé peut réellement joindre WACEPAY. On
-        // utilise donc CET endpoint de diagnostic, déjà en production, comme
-        // "Postman à distance" : chaque combinaison méthode/chemin/format de
-        // paramètres est testée INDIVIDUELLEMENT et en brut (contrairement à
-        // getPayoutServiceCode() ci-dessus, qui s'arrête au premier succès et ne
-        // remonte que la DERNIÈRE erreur de sa cascade) pour voir le détail exact
-        // (code HTTP, corps de réponse) de CHAQUE tentative en un seul
-        // déploiement, plutôt que d'itérer un correctif à la fois (cycle
-        // push/redéploiement trop lent pour deviner à l'aveugle).
-        $probe = function (string $label, string $method, string $path, array $params) use ($client, $run) {
-            $run("payout_service_code PROBE: $label", function () use ($client, $method, $path, $params) {
-                return $method === 'GET'
-                    ? $client->request('GET', $path, [], $params)
-                    : $client->request('POST', $path, $params);
-            });
-        };
-        $probe('GET snake_case, query params payoutCountry/payoutCurrency', 'GET', 'transaction/payout_service_code', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
-        $probe('GET camelCase, query params payoutCountry/payoutCurrency', 'GET', 'transaction/payoutServiceCode', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
-        $probe('POST snake_case, json payoutCountry/payoutCurrency', 'POST', 'transaction/payout_service_code', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
-        $probe('POST camelCase, json payoutCountry/payoutCurrency', 'POST', 'transaction/payoutServiceCode', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
-        $probe('GET snake_case, path segments /CI/XOF (style origin_fund/{type})', 'GET', 'transaction/payout_service_code/CI/XOF', []);
-        $probe('GET camelCase, path segments /CI/XOF', 'GET', 'transaction/payoutServiceCode/CI/XOF', []);
-        $probe('POST kebab-case, json payoutCountry/payoutCurrency', 'POST', 'transaction/payout-service-code', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
-        $probe('GET kebab-case, query params', 'GET', 'transaction/payout-service-code', ['payoutCountry' => 'CI', 'payoutCurrency' => 'XOF']);
-        $probe('POST snake_case, json country/currency (noms de champs alternatifs)', 'POST', 'transaction/payout_service_code', ['country' => 'CI', 'currency' => 'XOF']);
-        $probe('GET snake_case, query params country/currency (noms de champs alternatifs)', 'GET', 'transaction/payout_service_code', ['country' => 'CI', 'currency' => 'XOF']);
-
-        $email = (string) env('DIGITWACE_EMAIL');
-        $maskedEmail = $email ? (substr($email, 0, 4) . '***@' . (explode('@', $email)[1] ?? '')) : null;
-
-        return response()->json([
-            'status' => 200,
-            'digitwace_url' => env('DIGITWACE_URL'),
-            'digitwace_email_masked' => $maskedEmail,
-            'outbound_ip' => $outboundIp,
-            'outbound_ip_check_error' => $ipCheckError,
-            'outbound_ip_note' => 'IP sortante actuelle du serveur (via api.ipify.org). Stable uniquement si "Static Outbound IPs" est activé sur Railway (plan Pro) — sinon susceptible de changer au prochain redéploiement.',
-            'checks' => $checks,
-        ]);
-    }
 }

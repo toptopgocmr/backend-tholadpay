@@ -186,54 +186,27 @@ class DigitwaceClient
     }
 
     /**
-     * NOTE : la doc DigitWace (§XIV PayoutServiceCode) affiche par erreur le
-     * meme "Sample URL request" que la section Bank juste au-dessus
-     * (POST /transaction/bank/create), ce qui ne peut pas etre le vrai chemin
-     * de cet endpoint (meme URL que la creation de transaction bancaire, avec
-     * un payload totalement different).
+     * FIX (2026-08-24) : la doc DigitWace v2.0.0 avait initialement un bug de
+     * copier-coller — la section XIV PayoutServiceCode affichait le meme
+     * "Sample URL request" que la section X Bank juste au-dessus
+     * (POST /transaction/bank/create), pour un payload totalement different.
+     * Aucune des 4 variantes devinees (GET/POST x snake_case/camelCase sur
+     * 'payout_service_code') ne fonctionnait (404/405 en cascade, voir
+     * historique git pour l'ancienne implementation).
      *
-     * FIX (2026-08-22, test reel transaction #100 en sandbox) : la premiere
-     * hypothese (POST /transaction/payout_service_code) echoue desormais avec
-     * un 405 Method Not Allowed, PAS un 404 comme prevu par le repli existant
-     * ci-dessous — un 405 signifie generalement que le CHEMIN existe mais que
-     * le VERBE HTTP est faux, pas que le chemin est introuvable. Or tous les
-     * autres endpoints "liste de reference" de ce meme client (getRelation,
-     * getOriginFund, getReason, getBalance ci-dessous) sont en GET, jamais en
-     * POST — PayoutServiceCode est conceptuellement la meme famille
-     * d'endpoint (une liste de reference, pas une creation de ressource). On
-     * tente donc desormais GET en premier (avec les parametres en query
-     * string plutot qu'en corps JSON), PUIS POST en repli, sur les deux
-     * variantes de chemin (snake_case/camelCase) — et on retente sur 404 OU
-     * 405 (pas seulement 404 comme avant), meme strategie de repli en cascade
-     * que OutboundController::check_account_status pour Peex.
+     * WACEPAY a republie le PDF (meme version 2.0.0, meme date de couverture,
+     * contenu de la section XIV corrige) avec le vrai chemin, confirme par un
+     * test reel en sandbox le 2026-08-24 (login + requete effectues depuis
+     * Postman) : POST /transaction/payouts/services, meme payload JSON que
+     * documente ({payoutCountry, payoutCurrency}). Plus besoin de repli en
+     * cascade.
      */
     public function getPayoutServiceCode(string $payoutCountry, string $payoutCurrency): array
     {
-        $params = ['payoutCountry' => $payoutCountry, 'payoutCurrency' => $payoutCurrency];
-        $attempts = [
-            ['GET', 'transaction/payout_service_code'],
-            ['GET', 'transaction/payoutServiceCode'],
-            ['POST', 'transaction/payout_service_code'],
-            ['POST', 'transaction/payoutServiceCode'],
-        ];
-        $lastException = null;
-
-        foreach ($attempts as $i => $attempt) {
-            [$method, $path] = $attempt;
-            try {
-                return $method === 'GET'
-                    ? $this->request('GET', $path, [], $params)
-                    : $this->request('POST', $path, $params);
-            } catch (RequestException $e) {
-                $lastException = $e;
-                $status = $e->hasResponse() ? $e->getResponse()->getStatusCode() : null;
-                if (in_array($status, [404, 405], true) && $i < count($attempts) - 1) {
-                    continue;
-                }
-                throw $e;
-            }
-        }
-        throw $lastException;
+        return $this->request('POST', 'transaction/payouts/services', [
+            'payoutCountry' => $payoutCountry,
+            'payoutCurrency' => $payoutCurrency,
+        ]);
     }
 
     public function getCollectionCode(array $data): array

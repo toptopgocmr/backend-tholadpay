@@ -89,12 +89,15 @@ $api->version('v1', function (Router $api) {
         // (doc §XIX Balance), même usage que get_peex_account ci-dessus — affiché
         // sur le dashboard admin (voir AdminController::index / home.blade.php).
         $api->get('get_digitwace_account', 'OutboundController@get_digitwace_account');
-        // AJOUT (2026-08-20, demande explicite "rapport de tests DigitWace") :
-        // endpoint de diagnostic TEMPORAIRE, protégé par secret partagé
-        // (?secret=... == DIGITWACE_DIAG_SECRET en .env) — voir
-        // OutboundController::digitwace_diag. À SUPPRIMER une fois le
-        // diagnostic terminé (cette ligne + la méthode associée).
-        $api->get('digitwace/diag', 'OutboundController@digitwace_diag');
+        // RETIRÉ (2026-08-24) : 'digitwace/diag' était un endpoint de diagnostic
+        // temporaire ajouté le 2026-08-20 pour identifier le vrai chemin de
+        // PayoutServiceCode depuis Railway (seul serveur avec IP whitelistée
+        // WACEPAY). Le chemin est désormais confirmé (POST
+        // /transaction/payouts/services, voir DigitwaceClient::
+        // getPayoutServiceCode) et vérifié par un test réel en sandbox — la
+        // route et OutboundController::digitwace_diag ont été supprimées comme
+        // prévu par leur propre commentaire "À SUPPRIMER une fois le
+        // diagnostic terminé".
 
         // AJOUT (2026-08-20) : callback webhook PawaPay (doc "Remittance
         // callback"), à configurer dans le Dashboard PawaPay -> Callback URLs
