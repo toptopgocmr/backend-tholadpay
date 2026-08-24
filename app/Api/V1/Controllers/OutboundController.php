@@ -192,6 +192,39 @@ class OutboundController extends Controller
     }
 
     /**
+     * FIX (2026-08-24, transaction #127 vers la Côte d'Ivoire) : en auditant
+     * les captures Railway de plusieurs transactions (#118/#120/#127), le
+     * numéro tel qu'affiché par l'admin (issu de $request->get('receiver_phone'))
+     * contenait parfois un chiffre de trop après l'indicatif (+225 0704968330 =
+     * 13 chiffres au lieu de 12) — exactement le même '0' de tronc que
+     * toLocalPhoneNumber() retire déjà pour 'mobileReceiveNumber' dans
+     * sendDigitwaceWalletTransaction. Vérification faite : ce champ
+     * 'mobileReceiveNumber' est bien nettoyé (confirmé par le brandHint ORANGE
+     * correctement déduit sur #127, donc la 2008 de cette transaction précise
+     * est bien un problème côté WACEPAY et pas de formatage — voir message de
+     * support déjà rédigé). En revanche 'phone'/'mobile' envoyés à
+     * /beneficiary/create (createDigitwaceBeneficiary ci-dessous) passaient
+     * jusqu'ici par toInternationalPhone() SEUL, qui ne retire jamais ce '0'
+     * de tronc (contrairement à toLocalPhoneNumber()) : incohérence entre les
+     * deux endpoints DigitWace, potentiellement source d'un rejet WACEPAY sur
+     * un futur corridor qui validerait strictement ce champ. On réutilise donc
+     * ici la même logique de nettoyage (indicatif + numéro local sans zéro de
+     * tronc) pour reconstruire un numéro international propre.
+     */
+    private function toCleanInternationalPhone(?string $rawPhone, ?string $dial): ?string
+    {
+        $international = $this->toInternationalPhone($rawPhone);
+        if (!$international) {
+            return null;
+        }
+        if (!$dial) {
+            return $international;
+        }
+        $local = $this->toLocalPhoneNumber($international, $dial);
+        return $local ? $dial . $local : $international;
+    }
+
+    /**
      * Uniform error handling for Peex calls: tries to decode Peex's
      * {error: {statusCode, name, message}} JSON body when available.
      */
@@ -785,13 +818,17 @@ class OutboundController extends Controller
         //    premier par WACEPAY, masquant ce second problème. On réutilise
         //    countryNameToIso2() (déjà la source de vérité nom<->ISO2 dans ce
         //    contrôleur) au lieu de dupliquer une conversion.
+        $receivingCountryForDial = $request->get('receiving_country');
+        $dialForBeneficiary = PeexCorridors::list()[strtoupper((string) $receivingCountryForDial)]['dial'] ?? null;
+        $cleanBeneficiaryPhone = $this->toCleanInternationalPhone($request->get('receiver_phone'), $dialForBeneficiary);
+
         $payload = [
             'type' => $isBusiness ? 'B' : 'P',
             'firstName' => $request->get('receiver_first_name'),
             'lastName' => $request->get('receiver_last_name'),
             'address' => $request->get('receiver_address') ?: $request->get('receiving_country'),
-            'phone' => $this->toInternationalPhone($request->get('receiver_phone')),
-            'mobile' => $this->toInternationalPhone($request->get('receiver_phone')),
+            'phone' => $cleanBeneficiaryPhone,
+            'mobile' => $cleanBeneficiaryPhone,
             'country' => $this->countryNameToIso2($request->get('receiving_country')),
             'city' => $request->get('receiver_city') ?: 'Any City',
             'email' => $request->get('receiver_email'),
