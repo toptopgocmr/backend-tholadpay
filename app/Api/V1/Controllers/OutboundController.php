@@ -842,7 +842,60 @@ class OutboundController extends Controller
      * mode demandé, pour ne pas obliger l'agent à choisir manuellement dans
      * le cas le plus courant (un seul opérateur dispo pour le pays/la devise).
      */
-    private function resolveDigitwacePayerCode(string $country, string $currency, ?string $serviceHint, bool $forBank): array
+    /**
+     * AJOUT (2026-08-24, demande explicite) : préfixes opérateur mobile
+     * connus, pour déduire automatiquement l'opérateur du bénéficiaire à
+     * partir de son numéro plutôt que de systématiquement redemander à
+     * l'agent (voir guessMobileOperatorBrand ci-dessous et le FIX du
+     * 2026-08-24 sur resolveDigitwacePayerCode). Sources vérifiées le
+     * 24/08/2026 — plan de numérotation à 10 chiffres effectif depuis le
+     * 31/01/2021, confirmé par Orange CI (orange.ci/fr/plan-national-de-
+     * numerotation-a-10-chiffres.html), MTN CI (mtn.ci/article/nouvelle-
+     * numerotation-en-cote-divoire) et la notification ITU du 24/12/2020
+     * (T02020000310006PDFF.pdf) : 07 -> Orange, 05 -> MTN, 01 -> Moov.
+     * Wave n'a volontairement PAS d'entrée : c'est un portefeuille "OTT"
+     * utilisable sur n'importe quel opérateur, donc indéductible du seul
+     * numéro. À étendre pays par pays au besoin — vérifier la source
+     * officielle avant d'ajouter une entrée, une déduction fausse enverrait
+     * les fonds vers le mauvais opérateur.
+     */
+    private const MOBILE_OPERATOR_PREFIXES = [
+        'CI' => [
+            '07' => 'ORANGE',
+            '05' => 'MTN',
+            '01' => 'MOOV',
+        ],
+    ];
+
+    /**
+     * Déduit la marque de l'opérateur mobile à partir du numéro LOCAL déjà
+     * normalisé par toLocalPhoneNumber() (donc sans indicatif pays, avec le
+     * zéro de tronc initial déjà retiré). Ne renvoie une réponse que si le
+     * numéro a exactement 9 chiffres (= un numéro CI à 10 chiffres, plan
+     * 2021, une fois son zéro de tête retiré) : un numéro à 8 chiffres est
+     * forcément un ancien numéro pré-2021 sans opérateur encodé dedans, on
+     * préfère ne rien deviner plutôt que de risquer un faux positif sur son
+     * premier chiffre.
+     */
+    private function guessMobileOperatorBrand(string $countryIso2, ?string $localNumber): ?string
+    {
+        $prefixes = self::MOBILE_OPERATOR_PREFIXES[strtoupper($countryIso2)] ?? null;
+        if (!$prefixes || !$localNumber) {
+            return null;
+        }
+        $digits = preg_replace('/\D/', '', $localNumber);
+        if (strlen($digits) !== 9) {
+            return null;
+        }
+        foreach ($prefixes as $prefix => $brand) {
+            if (str_starts_with($digits, ltrim($prefix, '0'))) {
+                return $brand;
+            }
+        }
+        return null;
+    }
+
+    private function resolveDigitwacePayerCode(string $country, string $currency, ?string $serviceHint, bool $forBank, ?string $brandHint = null): array
     {
         // FIX (2026-08-22, vérification préventive USA/Côte d'Ivoire/Chine après
         // l'incident 'city' bénéficiaire de la transaction #100) : $country
@@ -910,6 +963,27 @@ class OutboundController extends Controller
 
             $wanted = $forBank ? 'bank' : 'wallet';
             $candidates = array_values(array_filter($list, fn($entry) => $classify($entry) === $wanted));
+
+            // AJOUT (2026-08-24, demande explicite) : avant de bloquer l'agent
+            // avec une liste à choisir manuellement, on tente de déduire
+            // l'opérateur du numéro du bénéficiaire lui-même (voir
+            // guessMobileOperatorBrand ci-dessus). Si ça réduit à UN seul
+            // candidat, on l'utilise directement. WACEPAY expose deux entrées
+            // distinctes pour MTN Côte d'Ivoire ('MOMO'/MTN MONEY et
+            // 'MTN'/MTN MOBILE MONEY, cause encore non clarifiée par leur
+            // support) : dans ce cas précis $brandHint réduit la liste à ces
+            // deux entrées mais reste ambigu — on demande alors quand même à
+            // préciser, avec une liste déjà réduite plutôt que les 5
+            // opérateurs complets.
+            if (count($candidates) > 1 && $brandHint) {
+                $narrowed = array_values(array_filter(
+                    $candidates,
+                    fn($entry) => stripos((string) ($entry['ServiceName'] ?? ''), $brandHint) !== false
+                ));
+                if (!empty($narrowed)) {
+                    $candidates = $narrowed;
+                }
+            }
 
             if (count($candidates) === 1) {
                 $service = $candidates[0]['ServiceCode'];
@@ -1647,12 +1721,19 @@ class OutboundController extends Controller
             $refFields = $this->requireDigitwaceReferenceFields($request);
             $senderCode = $this->ensureDigitwaceSenderCode($sender, $user);
             $beneficiary = $this->createDigitwaceBeneficiary($request, $senderCode);
-            $payer = $this->resolveDigitwacePayerCode($receivingCountry, $fromCurrency, $request->get('digitwace_service'), false);
 
             $dial = PeexCorridors::list()[strtoupper($receivingCountry)]['dial'] ?? null;
             // FIX (2026-08-20) : voir toLocalPhoneNumber() — même correctif que
             // check_account_status ci-dessus (retrait du '0' de tronc initial).
             $localNumber = $this->toLocalPhoneNumber($phone, $dial);
+
+            // AJOUT (2026-08-24, demande explicite) : déduit l'opérateur du
+            // bénéficiaire depuis son numéro (voir guessMobileOperatorBrand)
+            // AVANT d'appeler resolveDigitwacePayerCode, pour éviter de
+            // redemander systématiquement à l'agent de préciser
+            // 'digitwace_service' quand c'est déductible sans ambiguïté.
+            $brandHint = $this->guessMobileOperatorBrand($this->countryNameToIso2($receivingCountry), $localNumber);
+            $payer = $this->resolveDigitwacePayerCode($receivingCountry, $fromCurrency, $request->get('digitwace_service'), false, $brandHint);
 
             $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
 
