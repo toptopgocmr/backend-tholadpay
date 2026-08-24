@@ -867,20 +867,61 @@ class OutboundController extends Controller
 
         if (!$service) {
             $list = $client->getPayoutServiceCode($country, $currency)['data'] ?? [];
-            $match = null;
-            foreach ($list as $entry) {
-                $isBankEntry = ($entry['ServiceCode'] ?? '') === 'B'
-                    || stripos($entry['ServiceName'] ?? '', 'BANK') !== false;
-                if ($forBank === $isBankEntry) {
-                    $match = $entry;
-                    break;
+
+            // FIX (2026-08-24) : bug découvert via un test réel en production
+            // (transaction #102, Côte d'Ivoire/XOF, virement Mobile vers Traoré
+            // Martial, rejeté par WACEPAY avec l'erreur 2008 "Payer code is not
+            // match"). Cause racine : PayoutServiceCode(CI, XOF) renvoie 7
+            // entrées — B (BANKS DEPOSIT), C (CASH), MOMO (MTN MONEY), MTN (MTN
+            // MOBILE MONEY), MV (MOOV), OM (ORANGE MONEY), WV (WAVE) — dans cet
+            // ordre. L'ancienne logique ne distinguait que "banque" vs "pas
+            // banque" : pour un virement Mobile ($forBank=false), elle prenait
+            // la première entrée non-bancaire de la liste, qui se trouve être
+            // 'C' (CASH) — un mode de livraison totalement différent, pas un
+            // opérateur mobile money. Le payerCode obtenu pour 'C' ne
+            // correspondait donc à rien de valide pour un envoi Mobile,
+            // d'où le rejet WACEPAY.
+            //
+            // On distingue maintenant explicitement 3 catégories (bank / cash /
+            // wallet) et on ne choisit automatiquement QUE s'il y a exactement
+            // un candidat de la catégorie demandée. S'il y en a plusieurs (cas
+            // Côte d'Ivoire : 5 opérateurs mobile money possibles), on refuse
+            // de deviner lequel correspond au bénéficiaire — envoyer les fonds
+            // vers le mauvais opérateur serait pire qu'une erreur bloquante —
+            // et on demande explicitement à l'appelant de préciser
+            // 'digitwace_service' parmi la liste retournée.
+            $classify = function (array $entry): string {
+                $code = strtoupper((string) ($entry['ServiceCode'] ?? ''));
+                $name = strtoupper((string) ($entry['ServiceName'] ?? ''));
+                if ($code === 'B' || stripos($name, 'BANK') !== false) {
+                    return 'bank';
                 }
+                if ($code === 'C' || stripos($name, 'CASH') !== false) {
+                    return 'cash';
+                }
+                return 'wallet';
+            };
+            $describe = function (array $entries): string {
+                return implode(', ', array_map(
+                    fn($e) => ($e['ServiceCode'] ?? '?') . ' (' . ($e['ServiceName'] ?? '?') . ')',
+                    $entries
+                ));
+            };
+
+            $wanted = $forBank ? 'bank' : 'wallet';
+            $candidates = array_values(array_filter($list, fn($entry) => $classify($entry) === $wanted));
+
+            if (count($candidates) === 1) {
+                $service = $candidates[0]['ServiceCode'];
+            } elseif (count($candidates) === 0) {
+                $available = $list ? (' (services trouvés : ' . $describe($list) . ')') : '';
+                throw new \RuntimeException("Aucun service DigitWace de type '$wanted' disponible pour $country/$currency$available.");
+            } else {
+                throw new \InvalidArgumentException(
+                    "Plusieurs services DigitWace de type '$wanted' sont disponibles pour $country/$currency, "
+                    . "precisez 'digitwace_service' parmi : " . $describe($candidates) . '.'
+                );
             }
-            $match = $match ?: ($list[0] ?? null);
-            if (!$match) {
-                throw new \RuntimeException("Aucun service DigitWace disponible pour $country/$currency.");
-            }
-            $service = $match['ServiceCode'];
         }
 
         $payerResponse = $client->getPayerCode([
