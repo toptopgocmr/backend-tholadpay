@@ -376,6 +376,23 @@ class OutboundController extends Controller
      * soit {"messages":"..."} au niveau racine, jamais d'enveloppe imbriquée
      * "error" comme Peex).
      */
+    /**
+     * AJOUT (2026-08-24, demande explicite) : jusqu'ici, seule digitwaceErrorResponse()
+     * ci-dessous journalisait un corps de réponse — uniquement en cas d'ÉCHEC.
+     * Pour un suivi complet d'une transaction (diagnostic pas-à-pas, y compris
+     * quand tout réussit mais que le résultat final est inattendu, ex.
+     * transaction #101/#105/#112), on journalise désormais aussi le corps brut
+     * de CHAQUE étape réussie de la chaîne DigitWace (sender/create,
+     * beneficiary/create, PayoutServiceCode, GetPayerCode, bank/list,
+     * wallet|bank/create). Préfixe "[DigitWace step]" pour rester grep-able
+     * séparément des erreurs ("[DigitWace send_transaction]" etc.) dans les
+     * Network Logs Railway.
+     */
+    private function logDigitwaceStep(string $step, $response): void
+    {
+        Log::info('[DigitWace step] ' . $step . ' — corps brut : ' . json_encode($response));
+    }
+
     private function digitwaceErrorResponse(\Exception $e, $context = '')
     {
         $status = method_exists($e, 'getCode') ? $e->getCode() : 500;
@@ -682,6 +699,7 @@ class OutboundController extends Controller
         }
 
         $response = $this->digitwaceClient()->createSender($payload);
+        $this->logDigitwaceStep('sender/create', $response);
         $code = $response['sender']['Code'] ?? null;
         if (!$code) {
             throw new \RuntimeException('DigitWace /sender/create n\'a pas renvoyé de Code : ' . json_encode($response));
@@ -826,6 +844,7 @@ class OutboundController extends Controller
         }
 
         $response = $this->digitwaceClient()->createBeneficiary($payload);
+        $this->logDigitwaceStep('beneficiary/create', $response);
         $code = $response['beneficiary']['Code'] ?? null;
         if (!$code) {
             throw new \RuntimeException('DigitWace /beneficiary/create n\'a pas renvoyé de Code : ' . json_encode($response));
@@ -919,7 +938,9 @@ class OutboundController extends Controller
         $service = $serviceHint;
 
         if (!$service) {
-            $list = $client->getPayoutServiceCode($country, $currency)['data'] ?? [];
+            $serviceListResponse = $client->getPayoutServiceCode($country, $currency);
+            $this->logDigitwaceStep("PayoutServiceCode($country, $currency)", $serviceListResponse);
+            $list = $serviceListResponse['data'] ?? [];
 
             // FIX (2026-08-24) : bug découvert via un test réel en production
             // (transaction #102, Côte d'Ivoire/XOF, virement Mobile vers Traoré
@@ -1003,6 +1024,7 @@ class OutboundController extends Controller
             'payoutService' => $service,
             'toCurrency' => $currency,
         ]);
+        $this->logDigitwaceStep("GetPayerCode($country, $service, $currency)", $payerResponse);
         $payerCode = $payerResponse['transaction']['PayerCode'] ?? null;
         if (!$payerCode) {
             throw new \RuntimeException('DigitWace /transaction/payercode n\'a pas renvoyé de PayerCode : ' . json_encode($payerResponse));
@@ -1767,6 +1789,7 @@ class OutboundController extends Controller
                 'reason' => $refFields['reason'],
                 'relation' => $refFields['relation'],
             ]);
+            $this->logDigitwaceStep('wallet/create', $response);
         } catch (\InvalidArgumentException $e) {
             return response()->json(['status' => 422, 'message' => $e->getMessage()], 422);
         } catch (\GuzzleHttp\Exception\RequestException $e) {
@@ -1813,24 +1836,49 @@ class OutboundController extends Controller
             $payer = $this->resolveDigitwacePayerCode($receivingCountry, $fromCurrency, $request->get('digitwace_service'), true);
 
             $bankId = $request->get('bank_id');
-            if (!$bankId && $bankName) {
+            if (!$bankId) {
                 // FIX (2026-08-22) : voir commentaire de resolveDigitwacePayerCode()
                 // ci-dessus — getBankList() attend un ISO2 ('$iso2' dans sa
                 // signature, DigitwaceClient::getBankList), pas $receivingCountry
                 // brut ("France"/"United States"/"China").
-                $banks = $this->digitwaceClient()->getBankList($this->countryNameToIso2($receivingCountry), $payer['payerCode'])['data'] ?? [];
-                foreach ($banks as $bank) {
-                    if (stripos($bank['BankName'] ?? '', $bankName) !== false) {
-                        $bankId = $bank['BankID'];
-                        break;
+                $bankListResponse = $this->digitwaceClient()->getBankList($this->countryNameToIso2($receivingCountry), $payer['payerCode']);
+                $this->logDigitwaceStep("bank/list($receivingCountry, {$payer['payerCode']})", $bankListResponse);
+                $banks = $bankListResponse['data'] ?? [];
+
+                if ($bankName) {
+                    foreach ($banks as $bank) {
+                        if (stripos($bank['BankName'] ?? '', $bankName) !== false) {
+                            $bankId = $bank['BankID'];
+                            break;
+                        }
                     }
                 }
-            }
-            if (!$bankId) {
-                return response()->json([
-                    'status' => 422,
-                    'message' => "bank_id est requis pour DigitWace (voir get_digitwace_bank_list?country=$receivingCountry&payer_code={$payer['payerCode']}).",
-                ], 422);
+
+                // FIX (2026-08-24) : bug découvert via un test réel en production
+                // (transaction #104, Chine/CNY, virement Bancaire vers "Nanjing
+                // Teddif China") — getBankList(CN, ...) ne renvoie QU'UNE seule
+                // banque ("Union Pay", BankID 899), mais l'ancien code exigeait
+                // quand même un 'bank_name' qui matche exactement cette entrée,
+                // sans quoi il bloquait avec "bank_id est requis" même s'il n'y
+                // avait aucune ambiguïté possible. Même principe que
+                // resolveDigitwacePayerCode() ci-dessus : si un seul candidat
+                // existe, on l'utilise directement plutôt que d'exiger une
+                // correspondance de nom en plus.
+                if (!$bankId && count($banks) === 1) {
+                    $bankId = $banks[0]['BankID'];
+                }
+
+                if (!$bankId) {
+                    $describeBanks = implode(', ', array_map(
+                        fn($b) => ($b['BankID'] ?? '?') . ' (' . ($b['BankName'] ?? '?') . ')',
+                        $banks
+                    ));
+                    $available = $banks ? " (banques trouvées : $describeBanks)" : '';
+                    return response()->json([
+                        'status' => 422,
+                        'message' => "bank_id est requis pour DigitWace$available (voir get_digitwace_bank_list?country=$receivingCountry&payer_code={$payer['payerCode']}).",
+                    ], 422);
+                }
             }
 
             $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
@@ -1891,6 +1939,7 @@ class OutboundController extends Controller
                 'reason' => $refFields['reason'],
                 'relation' => $refFields['relation'],
             ]);
+            $this->logDigitwaceStep('bank/create', $response);
         } catch (\InvalidArgumentException $e) {
             return response()->json(['status' => 422, 'message' => $e->getMessage()], 422);
         } catch (\GuzzleHttp\Exception\RequestException $e) {
@@ -2109,6 +2158,7 @@ class OutboundController extends Controller
         for ($attempt = 1; $attempt <= 2; $attempt++) {
             try {
                 $result = $this->digitwaceClient()->confirm($reference);
+                $this->logDigitwaceStep("confirm($reference)", $result);
                 $message = $result['messages'] ?? $result['message'] ?? null;
                 $code = $result['status'] ?? $result['stauts'] ?? null;
 
