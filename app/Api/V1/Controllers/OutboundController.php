@@ -1888,13 +1888,23 @@ class OutboundController extends Controller
             return response()->json(['status' => 422, 'message' => 'receiving_country is required'], 422);
         }
         $fromCurrency = $request->get('sendingCurrency') ?: $request->get('currency') ?: 'XAF';
+        // FIX (2026-08-25, incident transaction #144, erreur WACEPAY "Aucun service
+        // DigitWace de type 'bank' disponible pour CI/XAF") : meme bug que celui deja
+        // corrige dans sendDigitwaceWalletTransaction() (voir $toCurrency plus haut
+        // dans cette meme classe, commit c70c023) mais jamais applique ici --
+        // resolveDigitwacePayerCode()/getPayoutServiceCode() attendent la devise de
+        // PAIEMENT/DESTINATION (XOF pour la Cote d'Ivoire), jamais la devise d'envoi
+        // ($fromCurrency, XAF). Confirme par les logs Railway : PayoutServiceCode(CI, XAF)
+        // renvoie une liste vide alors que PayoutServiceCode(CI, XOF) renvoie 7 entrees
+        // (B/C/MOMO/MTN/MV/OM/WV) pour la meme transaction.
+        $toCurrency = $request->get('receivingCurrency') ?: $fromCurrency;
         $bankName = $request->get('bank_name') ?: $request->get('bankname');
 
         try {
             $refFields = $this->requireDigitwaceReferenceFields($request);
             $senderCode = $this->ensureDigitwaceSenderCode($sender, $user);
             $beneficiary = $this->createDigitwaceBeneficiary($request, $senderCode);
-            $payer = $this->resolveDigitwacePayerCode($receivingCountry, $fromCurrency, $request->get('digitwace_service'), true);
+            $payer = $this->resolveDigitwacePayerCode($receivingCountry, $toCurrency, $request->get('digitwace_service'), true);
 
             $bankId = $request->get('bank_id');
             if (!$bankId) {
