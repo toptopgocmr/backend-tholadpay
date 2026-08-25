@@ -1785,6 +1785,18 @@ class OutboundController extends Controller
             // FIX (2026-08-20) : voir toLocalPhoneNumber() — même correctif que
             // check_account_status ci-dessus (retrait du '0' de tronc initial).
             $localNumber = $this->toLocalPhoneNumber($phone, $dial);
+            // FIX (2026-08-25, retour support WACEPAY) : contrairement à ce que
+            // laissait penser la doc v2.0.0 (aucun exemple explicite pour ce
+            // champ), WACEPAY confirme que 'mobileReceiveNumber' doit contenir
+            // le numéro complet AVEC indicatif pays (ex: "+225XXXXXXXXXX"), pas
+            // le numéro local seul comme envoyé jusqu'ici — probable cause
+            // racine de l'erreur 2008 déjà observée sur la transaction #127 et
+            // à l'époque attribuée à WACEPAY plutôt qu'à un problème de format.
+            // $localNumber reste utilisé tel quel pour guessMobileOperatorBrand
+            // ci-dessous (déduction d'opérateur, sans rapport avec ce champ) ;
+            // on réutilise toCleanInternationalPhone() (même nettoyage que pour
+            // 'phone'/'mobile' dans createDigitwaceBeneficiary) pour le payload.
+            $walletReceiveNumber = $this->toCleanInternationalPhone($phone, $dial);
 
             // AJOUT (2026-08-24, demande explicite) : déduit l'opérateur du
             // bénéficiaire depuis son numéro (voir guessMobileOperatorBrand)
@@ -1814,7 +1826,7 @@ class OutboundController extends Controller
                 'sender_code_transaction' => $senderCode,
                 'beneficiaryCode' => $beneficiary['code'],
                 'fromCurrency' => $fromCurrency,
-                'mobileReceiveNumber' => $localNumber,
+                'mobileReceiveNumber' => $walletReceiveNumber,
                 // FIX (2026-08-22) : idem conversion déjà appliquée à 'country'/
                 // 'nationality' dans ensureDigitwaceSenderCode() ci-dessus —
                 // $sender->country est stocké en clair ("Congo"), jamais en ISO2,
