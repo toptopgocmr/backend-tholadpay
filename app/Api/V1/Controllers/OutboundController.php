@@ -1775,6 +1775,18 @@ class OutboundController extends Controller
             return response()->json(['status' => 422, 'message' => 'receiving_country is required'], 422);
         }
         $fromCurrency = $request->get('sendingCurrency') ?: $request->get('currency') ?: 'XAF';
+        // FIX (2026-08-25, incident transactions #134/#135 apres correction du
+        // bug fromCurrency=XOF cote admin) : resolveDigitwacePayerCode() ->
+        // getPayoutServiceCode() a besoin de la devise de PAIEMENT (XOF pour
+        // la Cote d'Ivoire), jamais de la devise d'envoi ($fromCurrency, XAF).
+        // Cette fonction recevait $fromCurrency par erreur -- ca ne se voyait
+        // pas tant que $fromCurrency valait par erreur XOF (bug admin), mais
+        // une fois $fromCurrency correctement XAF, DigitWace repond "Aucun
+        // service DigitWace de type 'wallet' disponible pour CI/XAF" (aucun
+        // corridor XAF pour la Cote d'Ivoire, logique : sa devise est XOF).
+        // Meme pattern que sendDigitwaceBankTransaction ci-dessous, qui calcule
+        // deja $toCurrency separement de $fromCurrency.
+        $toCurrency = $request->get('receivingCurrency') ?: $fromCurrency;
 
         try {
             $refFields = $this->requireDigitwaceReferenceFields($request);
@@ -1804,7 +1816,7 @@ class OutboundController extends Controller
             // redemander systématiquement à l'agent de préciser
             // 'digitwace_service' quand c'est déductible sans ambiguïté.
             $brandHint = $this->guessMobileOperatorBrand($this->countryNameToIso2($receivingCountry), $localNumber);
-            $payer = $this->resolveDigitwacePayerCode($receivingCountry, $fromCurrency, $request->get('digitwace_service'), false, $brandHint);
+            $payer = $this->resolveDigitwacePayerCode($receivingCountry, $toCurrency, $request->get('digitwace_service'), false, $brandHint);
 
             $trackId = $request->get('track_id') ?: ($request->get('reference') ?: (string) Str::uuid()) . '-' . uniqid();
 
