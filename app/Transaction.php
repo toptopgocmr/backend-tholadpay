@@ -46,6 +46,10 @@ class Transaction extends Model
         // add_receiver_business_fields_to_transactions_table et doc DigitWace
         // §VI Create Beneficiary / §XVII-XVIII.
         'receiver_type', 'receiver_business_name', 'receiver_business_type', 'receiver_expire_date', 'business_type',
+        // AJOUT (2026-08-26) : voir migration add_receiver_address_city_email_to_transactions_table
+        // et OutboundController::createDigitwaceBeneficiary() -- address/city/email reels du
+        // beneficiaire (doc DigitWace §VI), auparavant jamais collectes ni stockes.
+        'receiver_address', 'receiver_city', 'receiver_email',
         // Saisie facultative, dès la création mobile, des champs propres à
         // PawaPay (opérateur + motif/origine des fonds) — voir migration
         // add_pawapay_fields_to_transactions_table. Repris automatiquement à
