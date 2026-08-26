@@ -40,7 +40,7 @@ class Transaction extends Model
         // TaxCalculationService (voir migration add_taxes_to_transactions_table et
         // table taxes) : TTF, Commission COBAC, TVA, Timbre electronique, leur
         // somme (total_taxes) et le montant total du frais d'envoi TTC.
-        'ttf', 'commission_cobac', 'tva', 'timbre_electronique', 'total_taxes', 'frais_envoi_ttc',
+        'ttf', 'commission_cobac', 'tva', 'timbre_electronique', 'total_taxes', 'frais_envoi_ttc', 'partner_fee',
         // Bénéficiaire Personnel ('P', défaut) ou Business ('B'), et combinaison
         // sender/bénéficiaire (p2p/b2b/b2p/p2b) — voir migration
         // add_receiver_business_fields_to_transactions_table et doc DigitWace

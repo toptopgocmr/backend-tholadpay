@@ -2176,6 +2176,18 @@ class OutboundController extends Controller
         $response['track_id'] = $reference;
         $response['reference'] = $reference;
         $response['digitwace_status'] = $digitwaceStatus;
+        // AJOUT (2026-08-26, demande explicite : "essaie de voir si c'est possible de
+        // prendre les commissions sur une api") : wallet/create (doc §VIII) et
+        // bank/create (doc §X) renvoient tous deux la VRAIE commission DigitWace/WACEPAY
+        // sous transaction.feeds (faute de frappe cote DigitWace, ex: "feeds": 350 ou
+        // "feeds": 7.5) -- jusqu'ici entierement ignoree ici, donc jamais transmise a
+        // l'admin ni enregistree. A ne pas confondre avec notre propre 'fees' (frais
+        // interne/tarif Send-Paz, deja utilise ailleurs) : on l'expose sous une cle
+        // distincte 'partner_fee' pour que TransactionController::sendtransaction()
+        // (admin) puisse la lire et l'enregistrer sur Transaction.partner_fee.
+        if (isset($tx['feeds']) && is_numeric($tx['feeds'])) {
+            $response['partner_fee'] = (float) $tx['feeds'];
+        }
         return $response;
     }
 
