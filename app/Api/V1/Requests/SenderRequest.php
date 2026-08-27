@@ -34,6 +34,8 @@ class SenderRequest extends FormRequest
             'country'=>'min:0|max:255',
             'date_exp_id'=>'date',
             'type_id'=>'',
+            // AJOUT (2026-08-27) : voir migration add_civil_status_to_senders_table.
+            'civil_status'=>'nullable|in:Single,Married',
             'user_id'=>'',
             'sex'=>'',
             'valid',

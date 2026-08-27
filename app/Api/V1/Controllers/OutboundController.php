@@ -645,9 +645,43 @@ class OutboundController extends Controller
         // WACEPAY correct pour une carte d'identité nationale est 'CI' (IDENTITY
         // CARD). Liste complète confirmée : PP, CI, RCCM, AG, TAX, CPF, CNPJ, FID,
         // CC, CR, SSP, LI, CNIC, BI, CID, GCCID.
-        $idTypeRaw = strtolower((string) ($sender->type_id ?? ''));
-        $idType = (strpos($idTypeRaw, 'pass') !== false) ? 'PP' : 'CI';
+        // FIX (2026-08-27, demande utilisateur : "ajouter les elements dans les
+        // listes comme sur les captures de digitwace") : cette même liste des 16
+        // codes a été reconfirmée en clair dans l'UI admin WACEPAY elle-même
+        // (Sender Personal Informations > ID Type, captures fournies le 2026-08-27).
+        // Le formulaire mobile (typesId, transaction.page.ts) envoie désormais un
+        // de ces 16 codes directement comme Sender::type_id, au lieu d'un texte
+        // libre deviné par sous-chaîne ("pass" -> PP, tout le reste -> CI) — on le
+        // transmet donc tel quel. $legacyIdTypeMap couvre les valeurs encore
+        // stockées en base pour des senders créés avant ce changement.
+        $digitwaceIdTypes = ['PP', 'CI', 'RCCM', 'AG', 'TAX', 'CPF', 'CNPJ', 'FID', 'CC', 'CR', 'SSP', 'LI', 'CNIC', 'BI', 'CID', 'GCCID'];
+        $legacyIdTypeMap = [
+            'CNI' => 'CI',
+            'PASSPORT' => 'PP',
+            'CARTE_SEJOUR' => 'CR',
+            'PERMIS_CONDUIRE' => 'CI',
+            'CARTE_RESIDENT' => 'CR',
+            'NIU' => 'TAX',
+            'CARTE_CONSULAIRE' => 'CI',
+        ];
+        $idTypeRaw = strtoupper(trim((string) ($sender->type_id ?? '')));
+        if (in_array($idTypeRaw, $digitwaceIdTypes, true)) {
+            $idType = $idTypeRaw;
+        } elseif (isset($legacyIdTypeMap[$idTypeRaw])) {
+            $idType = $legacyIdTypeMap[$idTypeRaw];
+        } else {
+            $idType = (strpos(strtolower($idTypeRaw), 'pass') !== false) ? 'PP' : 'CI';
+        }
         $gender = strtoupper((string) ($sender->sex ?? 'M')) === 'F' ? 'F' : 'M';
+        // FIX (2026-08-27, même demande) : "Civil status" (Single/Married,
+        // confirmé par les mêmes captures WACEPAY) a maintenant un vrai champ
+        // (migration add_civil_status_to_senders_table) au lieu d'être toujours
+        // "Single" en dur ; on ne fait confiance qu'aux deux valeurs réellement
+        // acceptées par DigitWace, tout le reste (NULL, valeur invalide) retombe
+        // sur 'Single' comme avant.
+        $civilStatus = in_array($sender->civil_status ?? null, ['Single', 'Married'], true)
+            ? $sender->civil_status
+            : 'Single';
 
         // AJOUT (2026-08-13, demande explicite) : support des senders Business
         // ('B', voir migration add_business_fields_to_senders_table) en plus des
@@ -692,7 +726,7 @@ class OutboundController extends Controller
             // ailleurs qu'à Brazzaville est enregistré — voir resolveSenderCity().
             'city' => $this->resolveSenderCity($sender),
             'gender' => $gender,
-            'civility' => 'Single', // Pas de champ "situation matrimoniale" en base ; valeur par défaut acceptée par DigitWace.
+            'civility' => $civilStatus,
             'idNumber' => $sender->cni_number,
             'idType' => $isBusiness ? 'RCCM' : $idType,
             'nationality' => $this->countryNameToIso2($sender->country),
