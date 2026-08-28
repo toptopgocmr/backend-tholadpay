@@ -856,6 +856,24 @@ class OutboundController extends Controller
         $dialForBeneficiary = PeexCorridors::list()[strtoupper((string) $receivingCountryForDial)]['dial'] ?? null;
         $cleanBeneficiaryPhone = $this->toCleanInternationalPhone($request->get('receiver_phone'), $dialForBeneficiary);
 
+        // FIX (2026-08-27, incident transactions Chine #CN) : 'city' retombait
+        // silencieusement sur le texte litteral 'Any City' quand l'admin ne
+        // remplissait pas le champ Ville du beneficiaire (update.blade.php).
+        // Pour la plupart des corridors DigitWace, cette valeur factice passait
+        // sans etre verifiee -- mais pour la Chine, WACEPAY valide la ville par
+        // rapport a une vraie liste et rejette avec HTTP 404 {"status":6002,
+        // "message":"This city does not exist or is disabled..."} sur
+        // /beneficiary/create, un echec tardif et peu comprehensible pour
+        // l'agent/l'admin (aucun rapport evident avec "Ville manquante"). On
+        // exige desormais explicitement ce champ, comme relation/reason/
+        // originFund le sont deja via requireDigitwaceReferenceFields() --
+        // l'admin voit immediatement "Ville du beneficiaire manquante" au lieu
+        // de decouvrir l'echec plusieurs etapes plus loin cote WACEPAY.
+        $receiverCity = trim((string) $request->get('receiver_city'));
+        if ($receiverCity === '') {
+            throw new \InvalidArgumentException("Ville du beneficiaire manquante (receiver_city) : obligatoire pour DigitWace, remplissez le champ 'Ville' du beneficiaire avant de valider la transaction.");
+        }
+
         $payload = [
             'type' => $isBusiness ? 'B' : 'P',
             'firstName' => $request->get('receiver_first_name'),
@@ -864,7 +882,7 @@ class OutboundController extends Controller
             'phone' => $cleanBeneficiaryPhone,
             'mobile' => $cleanBeneficiaryPhone,
             'country' => $this->countryNameToIso2($request->get('receiving_country')),
-            'city' => $request->get('receiver_city') ?: 'Any City',
+            'city' => $receiverCity,
             'email' => $request->get('receiver_email'),
             'idNumber' => $idNumber,
             'idType' => $isBusiness ? 'RCCM' : $idType,
