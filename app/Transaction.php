@@ -68,6 +68,23 @@ class Transaction extends Model
         return $this->belongsTo((User::exists()) ? User::class : null);
     }
 
+    /**
+     * FIX (2026-09-04, "Maximum execution time of 30 seconds exceeded" sur
+     * TransactionController@search cote admin) : la recherche par plage de
+     * dates faisait 1 requete HTTP par transaction validee (GET users/{id})
+     * pour recuperer le nom de l'agent/CSA qui a valide -- un appel PHP
+     * synchrone Guzzle par transaction, en boucle, sans aucun timeout. Sur
+     * une plage de quelques semaines avec beaucoup de transactions validees,
+     * la somme de ces appels sequentiels depassait le max_execution_time de
+     * 30s de PHP (FatalError, page blanche cote admin). Cette relation
+     * permet de charger le validateur en UNE seule requete via
+     * _includes=...,validator (voir TransactionController@search cote
+     * admin), au lieu d'une requete HTTP separee par transaction.
+     */
+    public function validator(){
+        return $this->belongsTo((User::exists()) ? User::class : null, 'valid_id');
+    }
+
     public function agent(){
         return $this->belongsTo((Agent::exists()) ? Agent::class : null);
     }
