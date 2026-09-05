@@ -63,12 +63,16 @@ $api->version('v1', function (Router $api) {
             $api->post("taxes", 'TaxController@store');
             $api->put("taxes/{id}", 'TaxController@update');
             $api->delete("taxes/{id}", 'TaxController@destroy');
+            $api->post("currencies", 'CurrencyController@store');
+            $api->put("currencies/{id}", 'CurrencyController@update');
+            $api->delete("currencies/{id}", 'CurrencyController@destroy');
         });
         $api->resource("addresses", 'AddressController');
         $api->resource("towns", 'TownController');
         $api->resource("verifications", 'VerificationController');
         $api->resource("countries", 'CountryController');
-        $api->resource("currencies", 'CurrencyController');
+        $api->get("currencies", 'CurrencyController@index');
+        $api->get("currencies/{id}", 'CurrencyController@show');
         $api->resource("images", 'ImageController');
         // users et senders : POST/GET publics pour l'inscription mobile ; PUT/DELETE protégés ci-dessous
         $api->get("users", 'UserController@index');
