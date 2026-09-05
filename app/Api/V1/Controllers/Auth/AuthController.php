@@ -75,12 +75,35 @@ class AuthController extends Controller
         if (!AppAccessChecker::isAppActive()) {
             return response()->error('Erreur lors de la configuration système', 403);
         }
+
+        // AJOUT (2026-09-05, demande explicite) : après 5 tentatives de connexion
+        // échouées (email/mot de passe incorrect), le compte est verrouillé
+        // automatiquement ; seul le super admin peut le réactiver ensuite (voir
+        // UserController::authorizeStatusChange côté Api\V1). On bloque ici
+        // avant même de tenter l'auth si le compte est déjà désactivé, pour ne
+        // pas incrémenter le compteur inutilement et donner un message clair.
+        if (!$user->is_active) {
+            return response()->error('Compte désactivé — contactez votre administrateur', 403);
+        }
+
         try {
             if (!$token = JWTAuth::attempt($credentials)) {
+                $user->failed_password_attemps = ($user->failed_password_attemps ?? 0) + 1;
+                if ($user->failed_password_attemps >= 5) {
+                    $user->is_active = 0;
+                    $user->status = 0;
+                }
+                $user->save();
                 return response()->error(trans('auth.failed'), 401);
             }
         } catch (\JWTException $e) {
             return response()->error('Could not create token', 500);
+        }
+
+        // Connexion réussie : on remet le compteur d'échecs à zéro.
+        if ($user->failed_password_attemps) {
+            $user->failed_password_attemps = 0;
+            $user->save();
         }
 
         $user = Auth::user();

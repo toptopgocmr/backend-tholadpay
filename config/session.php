@@ -161,7 +161,11 @@ return [
     |
     */
 
-    'secure' => env('SESSION_SECURE_COOKIE', false),
+    // MODIFIÉ (2026-09-05, suite au scan securityheaders.com : "The 'secure'
+    // flag is not set on this cookie") : true par défaut désormais - le site
+    // n'est servi qu'en HTTPS (voir rapport SSL Labs, note A). Peut être
+    // repassé à false via SESSION_SECURE_COOKIE=false en local si besoin.
+    'secure' => env('SESSION_SECURE_COOKIE', true),
 
     /*
     |--------------------------------------------------------------------------
@@ -175,5 +179,18 @@ return [
     */
 
     'http_only' => true,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Same-Site Cookies
+    |--------------------------------------------------------------------------
+    |
+    | AJOUT (2026-09-05, suite au scan securityheaders.com : "This is not a
+    | SameSite cookie"). 'lax' protège contre le CSRF cross-site tout en
+    | laissant fonctionner les liens/redirections normales vers l'admin panel.
+    |
+    */
+
+    'same_site' => env('SESSION_SAME_SITE', 'lax'),
 
 ];

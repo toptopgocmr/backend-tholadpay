@@ -40,9 +40,30 @@ $api->version('v1', function (Router $api) {
         });
         // Lectures publiques (référentiels, inscription)
         $api->resource("roles", 'RoleController');
-        $api->resource("zones", 'ZoneController');
-        $api->resource("tarifications", 'TarificationController');
-        $api->resource("taxes", 'TaxController');
+        // MODIFIÉ (2026-09-05, demande explicite) : zones / tarifications / taxes
+        // = grille tarifaire. La LECTURE reste publique (nécessaire au calcul de
+        // devis avant connexion, cf. commentaire plus bas sur le parcours invité),
+        // mais la MODIFICATION (create/update/delete) est réservée au super admin
+        // (rôle "administrator") — avant ce correctif ces 3 ressources étaient de
+        // simples $api->resource(...) donc entièrement PUBLIQUES en écriture,
+        // sans même nécessiter une connexion.
+        $api->get("zones", 'ZoneController@index');
+        $api->get("zones/{id}", 'ZoneController@show');
+        $api->get("tarifications", 'TarificationController@index');
+        $api->get("tarifications/{id}", 'TarificationController@show');
+        $api->get("taxes", 'TaxController@index');
+        $api->get("taxes/{id}", 'TaxController@show');
+        $api->group(['middleware' => ['jwt.auth', 'role:administrator']], function (Router $api) {
+            $api->post("zones", 'ZoneController@store');
+            $api->put("zones/{id}", 'ZoneController@update');
+            $api->delete("zones/{id}", 'ZoneController@destroy');
+            $api->post("tarifications", 'TarificationController@store');
+            $api->put("tarifications/{id}", 'TarificationController@update');
+            $api->delete("tarifications/{id}", 'TarificationController@destroy');
+            $api->post("taxes", 'TaxController@store');
+            $api->put("taxes/{id}", 'TaxController@update');
+            $api->delete("taxes/{id}", 'TaxController@destroy');
+        });
         $api->resource("addresses", 'AddressController');
         $api->resource("towns", 'TownController');
         $api->resource("verifications", 'VerificationController');

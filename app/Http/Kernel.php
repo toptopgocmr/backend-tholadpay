@@ -18,6 +18,9 @@ class Kernel extends HttpKernel
         \App\Http\Middleware\TrustProxies::class,
         \Fruitcake\Cors\HandleCors::class,
         \Illuminate\Foundation\Http\Middleware\CheckForMaintenanceMode::class,
+        // AJOUT (2026-09-05) : en-têtes de sécurité HTTP sur toutes les réponses
+        // (voir scan securityheaders.com fourni par l'utilisateur).
+        \App\Http\Middleware\SecurityHeaders::class,
     ];
 
     /**
@@ -52,5 +55,8 @@ class Kernel extends HttpKernel
         'throttle' => \Illuminate\Routing\Middleware\ThrottleRequests::class,
         'jwt.auth' => \Tymon\JWTAuth\Http\Middleware\Authenticate::class,
         'jwt.refresh' => \Tymon\JWTAuth\Http\Middleware\RefreshToken::class,
+        // AJOUT (2026-09-05, demande explicite) : restreint une route à un ou
+        // plusieurs rôles Laratrust (ex: 'role:administrator').
+        'role' => \App\Http\Middleware\EnsureRole::class,
     ];
 }

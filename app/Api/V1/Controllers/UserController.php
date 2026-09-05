@@ -127,7 +127,38 @@ class UserController extends Controller
      */
     public function update(UserRequest $request, $id)
     {
-        return RestHelper::update(User::class, $request->all(), $id);
+        $data = $request->all();
+        $targetUser = User::find($id);
+        if (!$targetUser) {
+            return Response::json(['error' => "l'utilisateur demandé n'existe pas"], 422);
+        }
+
+        // AJOUT (2026-09-05, demande explicite) : qui a le droit de bloquer /
+        // débloquer (is_active / status) quel profil. Avant ce correctif,
+        // n'importe quel compte authentifié (même un simple caissier / PSA)
+        // pouvait, en appelant directement cette route, changer le statut de
+        // n'importe quel autre utilisateur — seul le panel admin filtrait ça
+        // côté formulaire, jamais le backend.
+        if (array_key_exists('is_active', $data) || array_key_exists('status', $data)) {
+            $wantsReactivation = (array_key_exists('is_active', $data) && intval($data['is_active']) === 1)
+                || (array_key_exists('status', $data) && intval($data['status']) === 1);
+
+            $error = $this->authorizeStatusChange(Auth::user(), $targetUser, $wantsReactivation);
+            if ($error) {
+                return $error;
+            }
+
+            // Cas particulier (règle 4, demande explicite) : un compte
+            // auto-verrouillé après 5 tentatives de connexion échouées ne peut
+            // être réactivé QUE par le super admin (déjà vérifié ci-dessus) ;
+            // quand c'est bien lui qui réactive, on remet le compteur à zéro
+            // pour ne pas re-verrouiller le compte au prochain échec isolé.
+            if ($wantsReactivation && $targetUser->failed_password_attemps >= 5) {
+                $data['failed_password_attemps'] = 0;
+            }
+        }
+
+        return RestHelper::update(User::class, $data, $id);
     }
 
     /**
@@ -140,9 +171,78 @@ class UserController extends Controller
     {
         $Model = User::class;
         $m = $Model::find($id);
+        if (!$m) {
+            return Response::json(['error' => "l'utilisateur demandé n'existe pas"], 422);
+        }
+
+        // AJOUT (2026-09-05, demande explicite) : même règle d'autorisation que
+        // pour le blocage (voir update() ci-dessus) — supprimer un compte est au
+        // moins aussi sensible que le désactiver. Avant ce correctif, cette
+        // route ne vérifiait que jwt.auth : n'importe quel profil connecté
+        // pouvait supprimer définitivement n'importe quel autre utilisateur.
+        $error = $this->authorizeStatusChange(Auth::user(), $m, false);
+        if ($error) {
+            return $error;
+        }
+
         $m->delete();
         return Response::json($m, 200, [], JSON_NUMERIC_CHECK);
 //        return RestHelper::destroy(User::class,$id);
+    }
+
+    /**
+     * Détermine si $actingUser a le droit d'agir (bloquer/débloquer/supprimer)
+     * sur $targetUser, selon la règle métier (demande explicite du 2026-09-05) :
+     *   - super admin (rôle "administrator") : toujours autorisé.
+     *   - finance_manager : autorisé sur les PMA (rôle "agent") et les PSA
+     *     (rôle "cashier") uniquement.
+     *   - agent (PMA) : autorisé uniquement sur les PSA (rôle "cashier") qu'il
+     *     a lui-même créés (même hiérarchie d'agence, via agents.agent_id).
+     *   - tout autre profil : jamais autorisé.
+     *   - Réactivation d'un compte auto-verrouillé (5 échecs de connexion) :
+     *     réservée au super admin, quel que soit le profil normalement
+     *     autorisé à débloquer ce compte.
+     *
+     * @return \Illuminate\Http\JsonResponse|null null si autorisé, sinon la
+     *         réponse d'erreur 403 à renvoyer telle quelle.
+     */
+    private function authorizeStatusChange($actingUser, User $targetUser, bool $wantsReactivation)
+    {
+        if (!$actingUser) {
+            return Response::json(['error' => 'Non authentifié'], 401);
+        }
+
+        if ($actingUser->hasRole('administrator')) {
+            return null;
+        }
+
+        if ($wantsReactivation && $targetUser->failed_password_attemps >= 5) {
+            return Response::json([
+                'error' => 'Ce compte a été verrouillé après 5 tentatives de connexion échouées : seul le super admin peut le réactiver'
+            ], 403);
+        }
+
+        $targetRole = ($targetUser->roles && $targetUser->roles->first()) ? $targetUser->roles->first()->name : null;
+
+        if ($actingUser->hasRole('finance_manager')) {
+            if (in_array($targetRole, ['agent', 'cashier'])) {
+                return null;
+            }
+            return Response::json(['error' => "Vous n'êtes pas autorisé à modifier ce profil"], 403);
+        }
+
+        if ($actingUser->hasRole('agent')) {
+            $sameHierarchy = $targetRole === 'cashier'
+                && $targetUser->agent
+                && $actingUser->agent
+                && $targetUser->agent->agent_id == $actingUser->agent->id;
+            if ($sameHierarchy) {
+                return null;
+            }
+            return Response::json(['error' => "Vous ne pouvez agir que sur les PSA que vous avez créés"], 403);
+        }
+
+        return Response::json(['error' => "Vous n'êtes pas autorisé à effectuer cette action"], 403);
     }
 
     /**
