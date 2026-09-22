@@ -1968,7 +1968,33 @@ class OutboundController extends Controller
                 $this->logDigitwaceStep("bank/list($receivingCountry, {$payer['payerCode']})", $bankListResponse);
                 $banks = $bankListResponse['data'] ?? [];
 
-                if ($bankName) {
+                // AJOUT (2026-09-22, suggestion émise pendant l'incident transaction #267 :
+                // "a partir du IBAN ou du BIC l'application peut definir la banque") : le BIC est
+                // un identifiant fiable de la banque du beneficiaire, contrairement au bank_name
+                // saisi en texte libre par l'expediteur a la creation, qui ne correspond pas
+                // toujours exactement a l'orthographe de la liste DigitWace (cas reel : RIB Nickel
+                // / "Financiere des Paiements Electroniques", BIC FPELFR21XXX, pour une transaction
+                // ou bank_name etait vide/different). On tente donc d'abord une correspondance sur
+                // le BIC (8 premiers caracteres -- code banque+pays+localisation -- pour ignorer les
+                // variations de code d'agence en position 9-11, souvent 'XXX' generique) avant le
+                // repli existant sur bank_name. On n'a PAS pu confirmer que get_digitwace_bank_list
+                // expose reellement un champ BIC/SwiftCode (jamais observe jusqu'ici dans nos tests,
+                // uniquement BankID/BankName -- sandbox WACEPAY injoignable depuis cet environnement
+                // pour verifier), donc ce bloc teste plusieurs noms de cle plausibles et se degrade
+                // silencieusement vers la correspondance par bank_name si aucun champ BIC n'est
+                // present dans la reponse.
+                if ($bankSwift) {
+                    $bicNormalized = strtoupper(substr(trim($bankSwift), 0, 8));
+                    foreach ($banks as $bank) {
+                        $bankBic = $bank['SwiftCode'] ?? $bank['Swift'] ?? $bank['BIC'] ?? $bank['Bic'] ?? $bank['bic'] ?? $bank['swiftCode'] ?? null;
+                        if ($bankBic && strtoupper(substr(trim((string) $bankBic), 0, 8)) === $bicNormalized) {
+                            $bankId = $bank['BankID'];
+                            break;
+                        }
+                    }
+                }
+
+                if (!$bankId && $bankName) {
                     foreach ($banks as $bank) {
                         if (stripos($bank['BankName'] ?? '', $bankName) !== false) {
                             $bankId = $bank['BankID'];
