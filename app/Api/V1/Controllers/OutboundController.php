@@ -1887,7 +1887,16 @@ class OutboundController extends Controller
                 // sendDigitwaceBankTransaction/createBankTransaction : champ
                 // totalement absent de la doc v2.0.0, mais bien exigé aussi
                 // par l'endpoint wallet.
-                'sender_code_transaction' => $senderCode,
+                // FIX (2026-09-22, incident KL-2026-09-22-001, erreur DigitWace "Ce code
+                // partenaire existe deja") : ce champ envoyait $senderCode, qui est
+                // volontairement REUTILISE pour TOUTES les transactions d'un meme
+                // expediteur (voir ensureDigitwaceSenderCode) -- des qu'un expediteur
+                // envoyait une 2e transaction DigitWace, WACEPAY rejetait la creation
+                // en signalant ce "code partenaire" comme deja existant (deja utilise
+                // par la 1ere transaction). $trackId est deja garanti unique par
+                // tentative (voir plus haut, avec uniqid()) et convient donc bien mieux
+                // ici qu'un identifiant permanent partage entre transactions.
+                'sender_code_transaction' => $trackId,
                 'beneficiaryCode' => $beneficiary['code'],
                 'fromCurrency' => $fromCurrency,
                 'mobileReceiveNumber' => $walletReceiveNumber,
@@ -1910,6 +1919,16 @@ class OutboundController extends Controller
         } catch (\Exception $e) {
             Log::error('[DigitWace send_transaction] ' . $e->getMessage());
             return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
+        }
+
+        // FIX (2026-09-22, incident KL-2026-09-22-001) : voir commentaire identique dans
+        // sendDigitwaceBankTransaction ci-dessus -- WACEPAY peut refuser la creation en
+        // HTTP 200 avec {"error":true,...}, jamais detecte jusqu'ici avant confirm().
+        if (!empty($response['error'])) {
+            return response()->json([
+                'status' => 502,
+                'message' => 'DigitWace a refuse la creation de la transaction mobile money : ' . ($response['message'] ?? 'erreur inconnue.'),
+            ], 502);
         }
 
         $normalized = $this->normalizeDigitwaceTransactionResponse($response, $trackId);
@@ -2068,7 +2087,14 @@ class OutboundController extends Controller
                 // doc/API comme celui de PayoutServiceCode. On envoie donc la
                 // même valeur sous les deux clés en attendant confirmation
                 // WACEPAY sur la différence réelle entre les deux.
-                'sender_code_transaction' => $senderCode,
+                // FIX (2026-09-22, incident KL-2026-09-22-001, erreur DigitWace "Ce code
+                // partenaire existe deja") : voir commentaire identique dans
+                // sendDigitwaceWalletTransaction ci-dessus -- $senderCode est reutilise
+                // pour TOUTES les transactions d'un meme expediteur, WACEPAY rejetait
+                // donc la creation des la 2e transaction bancaire du meme expediteur en
+                // signalant ce "code partenaire" comme deja existant. On utilise
+                // desormais $trackId (deja garanti unique par tentative).
+                'sender_code_transaction' => $trackId,
                 'fromCurrency' => $fromCurrency,
                 'beneficiaryCode' => $beneficiary['code'],
                 'bankAccount' => $bankIban,
@@ -2096,6 +2122,23 @@ class OutboundController extends Controller
         } catch (\Exception $e) {
             Log::error('[DigitWace send_bank_transaction] ' . $e->getMessage());
             return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
+        }
+
+        // FIX (2026-09-22, incident KL-2026-09-22-001) : WACEPAY signale un refus de
+        // creation ("Ce code partenaire existe deja", entre autres) en HTTP 200 avec
+        // {"error":true,"message":...} -- Guzzle ne leve donc PAS d'exception, et le
+        // code plus bas (normalizeDigitwaceTransactionResponse/confirmDigitwaceTransaction)
+        // traitait jusqu'ici cette reponse comme un succes, generant une reference LOCALE
+        // ($trackId, jamais reellement creee chez DigitWace) puis tentant de la confirmer
+        // -- confirm() echouait alors avec "Transaction introuvable", affiche a l'agent
+        // comme "Transaction creee mais NON CONFIRMEE (statut incertain)" : message
+        // trompeur, la transaction n'a en realite JAMAIS ete creee. On detecte desormais
+        // ce refus explicitement, avant confirm(), pour renvoyer la vraie erreur.
+        if (!empty($response['error'])) {
+            return response()->json([
+                'status' => 502,
+                'message' => 'DigitWace a refuse la creation de la transaction bancaire : ' . ($response['message'] ?? 'erreur inconnue.'),
+            ], 502);
         }
 
         $normalized = $this->normalizeDigitwaceTransactionResponse($response, $trackId);
@@ -2225,6 +2268,7 @@ class OutboundController extends Controller
                 'response' => $responseAnswer,
                 'relation' => $refFields['relation'],
             ]);
+            $this->logDigitwaceStep('cash/create', $response);
         } catch (\InvalidArgumentException $e) {
             return response()->json(['status' => 422, 'message' => $e->getMessage()], 422);
         } catch (\GuzzleHttp\Exception\RequestException $e) {
@@ -2232,6 +2276,15 @@ class OutboundController extends Controller
         } catch (\Exception $e) {
             Log::error('[DigitWace send_cash_transaction] ' . $e->getMessage());
             return response()->json(['status' => 500, 'message' => $e->getMessage()], 500);
+        }
+
+        // FIX (2026-09-22, incident KL-2026-09-22-001) : voir commentaire identique dans
+        // sendDigitwaceBankTransaction/sendDigitwaceWalletTransaction ci-dessus.
+        if (!empty($response['error'])) {
+            return response()->json([
+                'status' => 502,
+                'message' => 'DigitWace a refuse la creation du retrait especes : ' . ($response['message'] ?? 'erreur inconnue.'),
+            ], 502);
         }
 
         $normalized = $this->normalizeDigitwaceTransactionResponse($response, $trackId);
