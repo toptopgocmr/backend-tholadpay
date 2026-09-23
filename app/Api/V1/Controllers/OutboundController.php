@@ -1947,6 +1947,37 @@ class OutboundController extends Controller
      * la bonne banque dans l'UI), soit résolu au mieux par correspondance de
      * nom sur la liste DigitWace du pays si seul 'bank_name' est fourni.
      */
+    /**
+     * AJOUT (2026-09-23) : retrouve le BankID DigitWace correspondant a un BIC.
+     * bank/list expose le BIC sous 'BankCode', en 8 OU 11 caracteres selon les
+     * banques ("FPELFR21", "CEPAFRPP444", "BOUSFRPPXXX"). On compare d'abord les
+     * 8 premiers caracteres (banque+pays+localisation, le suffixe agence est
+     * souvent 'XXX' generique), puis en repli les 6 premiers (banque+pays) mais
+     * seulement si UNE seule banque correspond, pour ne jamais choisir au hasard.
+     */
+    private function findDigitwaceBankIdByBic(array $banks, ?string $bic)
+    {
+        $bic = strtoupper(preg_replace('/\s+/', '', (string) $bic));
+        if (strlen($bic) < 6) {
+            return null;
+        }
+        $bankBicOf = function ($bank) {
+            $v = $bank['BankCode'] ?? $bank['SwiftCode'] ?? $bank['Swift'] ?? $bank['BIC'] ?? $bank['Bic'] ?? $bank['bic'] ?? $bank['swiftCode'] ?? null;
+            return $v ? strtoupper(preg_replace('/\s+/', '', (string) $v)) : '';
+        };
+        foreach ($banks as $bank) {
+            $b = $bankBicOf($bank);
+            if (strlen($b) >= 8 && strlen($bic) >= 8 && substr($b, 0, 8) === substr($bic, 0, 8)) {
+                return $bank['BankID'] ?? null;
+            }
+        }
+        $candidates = array_values(array_filter($banks, function ($bank) use ($bankBicOf, $bic) {
+            $b = $bankBicOf($bank);
+            return strlen($b) >= 6 && substr($b, 0, 6) === substr($bic, 0, 6);
+        }));
+        return count($candidates) === 1 ? ($candidates[0]['BankID'] ?? null) : null;
+    }
+
     private function sendDigitwaceBankTransaction(Request $request, User $user, Sender $sender)
     {
         $bankIban = $request->get('bank_iban') ?: $request->get('bankaccountno');
@@ -2002,15 +2033,15 @@ class OutboundController extends Controller
                 // pour verifier), donc ce bloc teste plusieurs noms de cle plausibles et se degrade
                 // silencieusement vers la correspondance par bank_name si aucun champ BIC n'est
                 // present dans la reponse.
+                // FIX (2026-09-23, transactions #269/#270, France) : les logs Railway
+                // confirment enfin le format reel de bank/list -- le BIC est expose sous
+                // la cle 'BankCode' (ex. {"BankName":"FINANCIERE DES PAIEMENTS
+                // ELECTRONIQUES","BankID":2503,"BankCode":"FPELFR21"}), cle qui manquait
+                // dans la liste ci-dessous : l'auto-detection ne se declenchait donc
+                // jamais (422 "bank_id est requis" depuis le mobile a 10:08, choix
+                // manuel oblige sur l'admin). Voir aussi findDigitwaceBankIdByBic().
                 if ($bankSwift) {
-                    $bicNormalized = strtoupper(substr(trim($bankSwift), 0, 8));
-                    foreach ($banks as $bank) {
-                        $bankBic = $bank['SwiftCode'] ?? $bank['Swift'] ?? $bank['BIC'] ?? $bank['Bic'] ?? $bank['bic'] ?? $bank['swiftCode'] ?? null;
-                        if ($bankBic && strtoupper(substr(trim((string) $bankBic), 0, 8)) === $bicNormalized) {
-                            $bankId = $bank['BankID'];
-                            break;
-                        }
-                    }
+                    $bankId = $this->findDigitwaceBankIdByBic($banks, $bankSwift);
                 }
 
                 if (!$bankId && $bankName) {
