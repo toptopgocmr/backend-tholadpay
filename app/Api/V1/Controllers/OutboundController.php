@@ -254,6 +254,47 @@ class OutboundController extends Controller
     }
 
     /**
+     * AJOUT (2026-09-24) : traduit le motif d'un refus Peex (souvent message=null,
+     * le vrai motif est dans payment_proof, ex. "INSUFFICIENT_FUND_TO_PAY_TX").
+     */
+    public static function peexReasonLabel(array $peexTx): string
+    {
+        $codes = [
+            'INSUFFICIENT_FUND_TO_PAY_TX' => 'Solde Send-Paz insuffisant chez Peex (compte prefunding a recharger avant de renvoyer)',
+        ];
+        $raw = '';
+        foreach (['message', 'payment_proof', 'reason', 'note', 'remarks', 'narration', 'description', 'comment'] as $k) {
+            if (!empty($peexTx[$k]) && is_string($peexTx[$k]) && stripos($peexTx[$k], '/images/') === false) {
+                $raw = trim($peexTx[$k]);
+                break;
+            }
+        }
+        if ($raw === '') { return ''; }
+        return $codes[strtoupper($raw)] ?? $raw;
+    }
+
+    /**
+     * AJOUT (2026-09-24) : refus immediat par Peex a la creation -> vraie erreur
+     * (402 pour solde insuffisant, 502 sinon) : rien n'est valide ni debite.
+     */
+    private function peexRefusalResponse(array $peexRequest, $trackId)
+    {
+        $st = strtolower((string) ($peexRequest['status'] ?? ''));
+        if (!in_array($st, ['rejected', 'failed', 'canceled', 'cancelled'], true)) {
+            return null;
+        }
+        $label = self::peexReasonLabel($peexRequest) ?: 'aucun motif fourni';
+        $insufficient = stripos((string) ($peexRequest['payment_proof'] ?? ''), 'INSUFFICIENT_FUND') !== false;
+        Log::warning('[Peex] demande refusee a la creation (track_id=' . $trackId . ') : ' . json_encode($peexRequest));
+        return response()->json([
+            'status' => $insufficient ? 402 : 502,
+            'message' => 'Peex a refusé la transaction : ' . $label . '. Aucune validation ni débit effectué.',
+            'peex_status' => $st,
+            'track_id' => $trackId,
+        ], $insufficient ? 402 : 502);
+    }
+
+    /**
      * Détermine le partenaire choisi pour cette requête. 'peex' par défaut :
      * tous les appelants existants (avant l'ajout de DigitWace) continuent
      * de fonctionner sans envoyer ce paramètre.
@@ -1696,6 +1737,13 @@ class OutboundController extends Controller
         $body['track_id'] = $peexRequest['track_id'] ?? $trackId;
         $body['reference'] = $body['track_id'];
         $body['peex_status'] = $peexRequest['status'] ?? null;
+        // FIX (2026-09-24, transaction #271 : Peex "rejected" + payment_proof
+        // "INSUFFICIENT_FUND_TO_PAY_TX") : Peex peut refuser la demande DES sa
+        // creation (HTTP 200, request.status = rejected) -- elle etait pourtant
+        // renvoyee comme un succes, donc validee + agent debite cote admin/mobile.
+        if ($refused = $this->peexRefusalResponse($peexRequest, $body['track_id'])) {
+            return $refused;
+        }
         return response()->json($body);
     }
 
@@ -1802,6 +1850,13 @@ class OutboundController extends Controller
         $body['track_id'] = $peexRequest['track_id'] ?? $trackId;
         $body['reference'] = $body['track_id'];
         $body['peex_status'] = $peexRequest['status'] ?? null;
+        // FIX (2026-09-24, transaction #271 : Peex "rejected" + payment_proof
+        // "INSUFFICIENT_FUND_TO_PAY_TX") : Peex peut refuser la demande DES sa
+        // creation (HTTP 200, request.status = rejected) -- elle etait pourtant
+        // renvoyee comme un succes, donc validee + agent debite cote admin/mobile.
+        if ($refused = $this->peexRefusalResponse($peexRequest, $body['track_id'])) {
+            return $refused;
+        }
         return response()->json($body);
     }
 
